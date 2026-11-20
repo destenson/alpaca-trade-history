@@ -16,7 +16,7 @@ from __future__ import annotations
 import csv
 import json
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from .occ import parse_occ, underlying_of
@@ -132,6 +132,13 @@ def fetch_bundle(client, start: str | None = None, benchmarks: list[str] | None 
     first = start or _first_activity_date(b.activities) or (date.today() - timedelta(days=365)).isoformat()
     log("Fetching portfolio history ...")
     b.portfolio_history = client.portfolio_history(start=f"{first}T00:00:00Z")
+    ts = b.portfolio_history.get("timestamp") or []
+    log(f"  {len(ts)} daily points")
+    last_act = _last_activity_date(b.activities)
+    if ts and last_act:
+        last_ph = datetime.fromtimestamp(ts[-1], timezone.utc).date()
+        if (date.fromisoformat(last_act) - last_ph).days > 7:
+            log(f"  WARNING: portfolio history ends {last_ph} but activities run to {last_act}")
     log("Fetching positions ...")
     b.positions = client.positions()
     unds, _ = traded_symbols(b.activities)
@@ -147,6 +154,12 @@ def fetch_bundle(client, start: str | None = None, benchmarks: list[str] | None 
     if held_or_traded:
         b.prices = client.latest_prices([s for s in held_or_traded if s.isalpha()])
     return b
+
+
+def _last_activity_date(acts: list[dict]) -> str | None:
+    ds = [(a.get("transaction_time") or a.get("date") or "")[:10] for a in acts]
+    ds = [d for d in ds if d]
+    return max(ds) if ds else None
 
 
 def _first_activity_date(acts: list[dict]) -> str | None:

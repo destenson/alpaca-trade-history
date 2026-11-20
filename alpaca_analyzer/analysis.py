@@ -33,6 +33,7 @@ class Analysis:
     reconciliation: pd.DataFrame | None = None
     primary_benchmark: str = "SPY"
     warnings: list[str] = field(default_factory=list)
+    alerts: list[str] = field(default_factory=list)   # data problems shown prominently in the report
     start: date | None = None
 
 
@@ -62,6 +63,7 @@ def run(bundle: Bundle, benchmarks: list[str] | None = None, combo_window_s: flo
     # ------------------------------------------------------ account-level series
     if bundle.portfolio_history:
         eq = M.equity_series(bundle.portfolio_history, ledger)
+        a.alerts += _coverage_alerts(eq, ledger)
         eq = _append_live_point(eq, bundle, ledger)
         if start_d is not None:
             eq = eq[eq.index >= start_d].copy()
@@ -291,10 +293,31 @@ def _append_live_point(eq: pd.DataFrame, bundle: Bundle, ledger: Ledger) -> pd.D
     today = last_activity
     if today is None or today <= eq.index[-1] or today.weekday() >= 5:
         return eq
+    if (today - eq.index[-1]).days > 5:
+        return eq  # history doesn't reach today: a lone live point would draw a false straight line
     flows = sum(e.cash for e in ledger.events if e.kind == "flow" and e.ny_date == today)
     eq = eq.copy()
     eq.loc[today] = {"equity": float(acct["equity"]), "flow": flows}
     return eq
+
+
+def _coverage_alerts(eq: pd.DataFrame, ledger: Ledger) -> list[str]:
+    """Detect a portfolio history that doesn't cover the trading activity."""
+    alerts = []
+    trades = [e.ny_date for e in ledger.events if e.kind == "trade"]
+    last_ph = eq.index[-1]
+    if trades and (max(trades) - last_ph).days > 7:
+        alerts.append(f"Portfolio history ends {last_ph:%Y-%m-%d}, but trades continue to {max(trades):%Y-%m-%d}. "
+                      "Account-level charts (equity, returns, drawdown, benchmarks) only cover the history that "
+                      "was fetched. Re-run <code>alpaca-analyzer fetch</code> with the latest version.")
+    if not eq.attrs.get("funded", True):
+        alerts.append("Every equity value in the portfolio history is $0 – the fetched window predates funding.")
+    dropped = eq.attrs.get("dropped_flows") or []
+    if dropped:
+        tot = sum(v for _, v in dropped)
+        alerts.append(f"{len(dropped)} deposits/withdrawals (net ${tot:,.2f}) fall after the end of the portfolio "
+                      "history and could not be counted.")
+    return alerts
 
 
 def _symbol_scorecard(a: Analysis, marks: dict[str, float]) -> pd.DataFrame:

@@ -31,6 +31,7 @@ def equity_series(portfolio_history: dict | None, ledger: Ledger) -> pd.DataFram
 
     cash = ledger.cash_df()
     flows = pd.Series(0.0, index=eq.index)
+    dropped: list[tuple] = []
     if not cash.empty and (cash["kind"] == "flow").any():
         f = cash[cash["kind"] == "flow"].groupby("date")["cash"].sum()
         for d, v in f.items():
@@ -40,6 +41,8 @@ def equity_series(portfolio_history: dict | None, ledger: Ledger) -> pd.DataFram
             idx = eq.index[eq.index >= d]
             if len(idx):
                 flows[idx[0]] += v
+            else:
+                dropped.append((d, float(v)))
     else:
         cf = portfolio_history.get("cashflow") or {}
         for k in ("CSD", "CSW", "JNLC", "ACATC"):
@@ -59,6 +62,8 @@ def equity_series(portfolio_history: dict | None, ledger: Ledger) -> pd.DataFram
     df = df.copy()
     first = df.index[0]
     df.loc[first, "flow"] = df.loc[first, "equity"] if df.loc[first, "flow"] == 0 else df.loc[first, "flow"]
+    df.attrs["dropped_flows"] = dropped
+    df.attrs["funded"] = bool((df["equity"] > 1.0).any())
     return df
 
 

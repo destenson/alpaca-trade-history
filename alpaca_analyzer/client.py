@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 import requests
@@ -18,6 +19,17 @@ DATA_URL = "https://data.alpaca.markets"
 
 class AlpacaError(RuntimeError):
     pass
+
+
+def pd_ts(s: str) -> datetime:
+    """Parse 'YYYY-MM-DD' or RFC 3339 into an aware UTC datetime."""
+    s = s.strip().replace("Z", "+00:00")
+    d = datetime.fromisoformat(s if "T" in s else s + "T00:00:00+00:00")
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def _rfc3339(d: datetime) -> str:
+    return d.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class AlpacaClient:
@@ -76,12 +88,47 @@ class AlpacaClient:
             params["page_token"] = page[-1]["id"]
         return out
 
-    def portfolio_history(self, start: str, end: str | None = None, timeframe: str = "1D") -> dict:
-        params = {"timeframe": timeframe, "start": start, "cashflow_types": "ALL",
-                  "intraday_reporting": "market_hours", "pnl_reset": "no_reset"}
-        if end:
-            params["end"] = end
-        return self._get(f"{self.base_url}/v2/account/portfolio/history", params)
+    def portfolio_history(self, start: str, end: str | None = None, timeframe: str = "1D",
+                          chunk_days: int = 365) -> dict:
+        """Daily equity history from ``start`` to ``end`` (default: now).
+
+        Alpaca applies a default ``period`` of one month when only ``start`` is given, so ``end`` is
+        always sent. The range is also requested in yearly windows and stitched together, which keeps
+        each response small and independent of server-side defaults.
+        """
+        t0 = pd_ts(start)
+        t1 = pd_ts(end) if end else datetime.now(timezone.utc)
+        merged: dict = {"timestamp": [], "equity": [], "cashflow": {}, "timeframe": timeframe}
+        seen: set[int] = set()
+        cur = t0
+        while cur < t1:
+            nxt = min(cur + timedelta(days=chunk_days), t1)
+            params = {"timeframe": timeframe, "start": _rfc3339(cur), "end": _rfc3339(nxt),
+                      "cashflow_types": "ALL", "pnl_reset": "no_reset"}
+            resp = self._get(f"{self.base_url}/v2/account/portfolio/history", params) or {}
+            ts = resp.get("timestamp") or []
+            eq = resp.get("equity") or []
+            cf = resp.get("cashflow") or {}
+            for i, t in enumerate(ts):
+                if t in seen:
+                    continue
+                seen.add(t)
+                merged["timestamp"].append(t)
+                merged["equity"].append(eq[i] if i < len(eq) else None)
+                n = len(merged["timestamp"])
+                for k, arr in cf.items():
+                    col = merged["cashflow"].setdefault(k, [])
+                    col.extend([0.0] * (n - 1 - len(col)))
+                    col.append(arr[i] if i < len(arr) else 0.0)
+            cur = nxt
+        n = len(merged["timestamp"])
+        for col in merged["cashflow"].values():
+            col.extend([0.0] * (n - len(col)))
+        order = sorted(range(n), key=lambda i: merged["timestamp"][i])
+        merged["timestamp"] = [merged["timestamp"][i] for i in order]
+        merged["equity"] = [merged["equity"][i] for i in order]
+        merged["cashflow"] = {k: [v[i] for i in order] for k, v in merged["cashflow"].items()}
+        return merged
 
     # ------------------------------------------------------------------ data
     def daily_bars(self, symbols: list[str], start: str, end: str | None = None,

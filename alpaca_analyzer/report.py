@@ -154,6 +154,9 @@ class Report:
         a, st = self.a, self.a.stats
         t = a.trades
         parts = []
+        if a.alerts:
+            parts.append('<div class="alert wide"><b>Data coverage problem</b><ul>'
+                         + "".join(f"<li>{m}</li>" for m in a.alerts) + "</ul></div>")
         if st:
             bs = a.bench_stats.get(a.primary_benchmark)
             vs = (st.total_return - bs.total_return) if bs else math.nan
