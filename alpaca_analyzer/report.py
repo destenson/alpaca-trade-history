@@ -54,7 +54,10 @@ def num(x, dp=2):
 
 def _iso(d):
     if isinstance(d, (pd.Timestamp, datetime)):
-        return pd.Timestamp(d).tz_convert(NY).strftime("%Y-%m-%d %H:%M") if pd.Timestamp(d).tzinfo else pd.Timestamp(d).strftime("%Y-%m-%d")
+        ts = pd.Timestamp(d)
+        if ts.tzinfo:
+            ts = ts.tz_convert(NY)
+        return ts.strftime("%Y-%m-%d") if (ts.hour, ts.minute, ts.second) == (0, 0, 0) else ts.strftime("%Y-%m-%d %H:%M")
     return d.isoformat() if isinstance(d, date) else str(d)
 
 
@@ -68,6 +71,8 @@ class Report:
         self.a = a
         self.figs: dict[str, dict] = {}
         self.sections: list[tuple[str, str, str]] = []   # (id, title, html)
+        self.share = bool(getattr(a, "share", False))
+        self.notional = float(getattr(a, "notional", 10_000.0))
 
     # -- primitives ---------------------------------------------------------
     def fig(self, fid: str, data: list, layout: dict | None = None, height: int = 320, note: str = "",
@@ -128,9 +133,11 @@ class Report:
         span = ""
         if a.equity is not None:
             span = f"{a.equity.index[0]:%b %d, %Y} – {a.equity.index[-1]:%b %d, %Y}"
+        if self.share:
+            span += f" · shared view: $ normalized to a {money(self.notional, dp=0)} account"
         script = f'<script>{inline_js}</script>' if inline_js else f'<script src="{PLOTLY_CDN}"></script>'
         out = (tpl.replace("{{NAV}}", nav).replace("{{BODY}}", body).replace("{{SPAN}}", html.escape(span))
-               .replace("{{GENERATED}}", datetime.now().strftime("%Y-%m-%d %H:%M"))
+               .replace("{{GENERATED}}", datetime.now().strftime("%Y-%m-%d" if self.share else "%Y-%m-%d %H:%M"))
                .replace("{{PLOTLY}}", script)
                .replace("{{FIGS}}", json.dumps(_clean(self.figs), default=_json_default, allow_nan=False)
                         .replace("</", "<\\/")))
@@ -160,11 +167,18 @@ class Report:
         if st:
             bs = a.bench_stats.get(a.primary_benchmark)
             vs = (st.total_return - bs.total_return) if bs else math.nan
+            if self.share:
+                parts.append('<div class="card wide prose"><b>Shared view.</b> Dollar amounts are normalized: '
+                             f'account curves show the growth of {money(self.notional, dp=0)} (deposits removed); '
+                             f'trade-level dollars are per {money(self.notional, dp=0)} of average account equity. '
+                             'Deposits, open positions, trade sizes and intraday times are not included.</div>')
             parts.append(self.tiles([
+                ("Growth of " + money(self.notional, dp=0), money(st.ending_equity, dp=0), "deposits removed")
+                if self.share else
                 ("Equity", money(st.ending_equity, dp=0), f"Net deposits {money(st.net_deposits, dp=0)}"),
                 ("Total P&L", money(st.pnl, signed=True, dp=0), f"Time-weighted {pct(st.total_return, True)}"),
                 (f"vs {a.primary_benchmark}", pct(vs, True), f"{a.primary_benchmark} {pct(bs.total_return, True) if bs else '–'}"
-                 f" · same deposits {money(bs.pnl, True, 0) if bs else '–'}"),
+                 + ("" if self.share else f" · same deposits {money(bs.pnl, True, 0) if bs else '–'}")),
                 ("Max drawdown", pct(st.max_dd), f"{money(st.max_dd_dollar, dp=0)} peak-to-trough P&L"),
                 ("Sharpe", num(st.sharpe), f"Sortino {num(st.sortino)} · vol {pct(st.vol, dp=0)}"),
                 ("Win rate", pct((t['pnl'] > 0).mean() if len(t) else math.nan, dp=0),
@@ -174,20 +188,26 @@ class Report:
             e = a.equity
             x = [_iso(d) for d in e.index]
             data = [
-                {"type": "scatter", "mode": "lines", "name": "Account equity", "x": x, "y": e["equity"].round(2).tolist(),
+                {"type": "scatter", "mode": "lines", "name": "Portfolio" if self.share else "Account equity", "x": x,
+                 "y": e["equity"].round(2).tolist(),
                  "line": {"color": S1, "width": 2}, "hovertemplate": "%{x}<br>Equity $%{y:,.2f}<extra></extra>"},
-                {"type": "scatter", "mode": "lines", "name": "Net deposits", "x": x, "y": e["net_deposits"].round(2).tolist(),
-                 "line": {"color": NEUTRAL, "width": 2, "shape": "hv", "dash": "dot"},
-                 "hovertemplate": "%{x}<br>Deposits $%{y:,.2f}<extra></extra>"},
             ]
+            if not self.share:
+                data.append({"type": "scatter", "mode": "lines", "name": "Net deposits", "x": x,
+                             "y": e["net_deposits"].round(2).tolist(),
+                             "line": {"color": NEUTRAL, "width": 2, "shape": "hv", "dash": "dot"},
+                             "hovertemplate": "%{x}<br>Deposits $%{y:,.2f}<extra></extra>"})
             for i, (sym, bf) in enumerate(a.bench.items()):
-                data.append({"type": "scatter", "mode": "lines", "name": f"{sym} with same deposits", "x": x,
+                data.append({"type": "scatter", "mode": "lines",
+                             "name": sym if self.share else f"{sym} with same deposits", "x": x,
                              "y": bf["value"].round(2).tolist(), "line": {"color": [S2, S3, S4][i % 3], "width": 2},
                              "hovertemplate": f"%{{x}}<br>{sym} $%{{y:,.2f}}<extra></extra>"})
             parts.append(self.fig("f_equity", data, {"yaxis": {"tickprefix": "$"}, "hovermode": "x unified"}, 360,
-                                  title="Equity vs. deposits vs. benchmarks",
-                                  subtitle="Benchmarks buy the benchmark with every deposit on the day it lands, so "
-                                           "dollar values are directly comparable.", wide=True))
+                                  title=(f"Growth of {money(self.notional, dp=0)} vs. benchmarks" if self.share
+                                         else "Equity vs. deposits vs. benchmarks"),
+                                  subtitle=("Time-weighted: the effect of deposits is removed." if self.share else
+                                            "Benchmarks buy the benchmark with every deposit on the day it lands, so "
+                                            "dollar values are directly comparable."), wide=True))
             parts.append(self._waterfall())
         self.section("overview", "Overview", "".join(parts))
 
@@ -202,12 +222,17 @@ class Report:
                  ("Unrealized", op["unrealized_pl"].sum(min_count=1) if not op.empty else 0.0),
                  ("Dividends", cs.get("income", 0.0)),
                  ("Margin interest", cs.get("interest", 0.0))]
+        if self.share:
+            items[2] = ("Unrealized", cs.get("unrealized", 0.0))
         items = [(k, float(0 if pd.isna(v) else v)) for k, v in items]
         explained = sum(v for _, v in items)
-        resid = a.stats.pnl - explained
-        items.append(("Other / timing", resid))
-        x = [k for k, _ in items] + ["Account P&L"]
-        y = [round(v, 2) for _, v in items] + [round(a.stats.pnl, 2)]
+        if self.share:
+            total_label, total = "Total (per avg. equity)", explained
+        else:
+            items.append(("Other / timing", a.stats.pnl - explained))
+            total_label, total = "Account P&L", a.stats.pnl
+        x = [k for k, _ in items] + [total_label]
+        y = [round(v, 2) for _, v in items] + [round(total, 2)]
         data = [{"type": "waterfall", "x": x, "y": y, "measure": ["relative"] * len(items) + ["total"],
                  "connector": {"line": {"color": "var:grid", "width": 1}},
                  "increasing": {"marker": {"color": GAIN}}, "decreasing": {"marker": {"color": LOSS}},
@@ -216,10 +241,16 @@ class Report:
                  "hovertemplate": "%{x}<br>%{y:$,.2f}<extra></extra>", "showlegend": False}]
         fee_note = (f"Fees ({money(cs.get('fees', 0))}) are already inside the realized/unrealized bars: each fill's "
                     f"price is its effective price (cost ÷ quantity, fees included).")
+        note = ("“Other / timing” is what the ledger can’t attribute: unpriced positions (e.g. "
+                "spin-offs), mark timing and rounding.")
+        if self.share:
+            fee_note = (f"Per {money(self.notional, dp=0)} of average account equity, so the total differs from the "
+                        f"growth-of-{money(self.notional, dp=0)} figure, which compounds returns over time. "
+                        "Fees are inside the bars.")
+            note = ""
         return self.fig("f_waterfall", data, {"yaxis": {"tickprefix": "$"}}, 340, title="Where the P&L came from",
                         subtitle="Since the start of the equity history. " + fee_note,
-                        note="“Other / timing” is what the ledger can’t attribute: unpriced positions (e.g. "
-                             "spin-offs), mark timing and rounding.", wide=True)
+                        note=note, wide=True)
 
     # ---------------------------------------------------------- performance
     def _performance(self):
@@ -306,7 +337,7 @@ class Report:
             rows.append({"": name, "Total return": pct(s.total_return, True), "Annualized": pct(s.cagr, True),
                          "Volatility": pct(s.vol), "Sharpe": num(s.sharpe), "Sortino": num(s.sortino),
                          "Max drawdown": pct(s.max_dd), "Calmar": num(s.calmar),
-                         "P&L on your deposits": money(s.pnl, True)})
+                         ("P&L on " + money(self.notional, dp=0) if self.share else "P&L on your deposits"): money(s.pnl, True)})
         parts.append('<figure class="card wide"><h3>Risk & return summary</h3>'
                      '<p class="sub">Benchmarks are run with your exact deposit dates and amounts. '
                      'Short histories make annualized numbers noisy – read them as direction, not forecast.</p>'
@@ -352,7 +383,8 @@ class Report:
         w, l = t[t["pnl"] > 0], t[t["pnl"] < 0]
         streak_w, streak_l = _streaks(t["pnl"])
         parts.append(self.tiles([
-            ("Realized P&L", money(t["pnl"].sum(), True, 0), f"{len(t)} closed lots · fees {money(t['fees'].sum())}"),
+            ("Realized P&L", money(t["pnl"].sum(), True, 0),
+             f"{len(t)} closed lots" + ("" if self.share else f" · fees {money(t['fees'].sum())}")),
             ("Win rate", pct(len(w) / len(t), dp=0), f"{len(w)} wins / {len(l)} losses"),
             ("Avg win / loss", f"{money(w['pnl'].mean(), dp=0)} / {money(l['pnl'].mean(), dp=0)}",
              f"payoff ratio {num(abs(w['pnl'].mean() / l['pnl'].mean()) if len(l) and len(w) else math.nan)}"),
@@ -384,17 +416,22 @@ class Report:
         parts.append(self.fig("f_hist", data, {"xaxis": {"tickprefix": "$"}, "yaxis": {"title": {"text": "Lots"}}}, 280,
                               title="P&L distribution per closed lot"))
 
+        # Per-trade points carry a symbol and date, so the shared view shows return % rather than dollars
+        # (a dollar figure next to a known contract price would reveal the normalization factor).
+        ycol, yfmt, hfmt = ("ret", {"tickformat": "+.0%"}, "%{y:+.1%}") if self.share else \
+            ("pnl", {"tickprefix": "$"}, "%{y:$,.2f}")
         data = []
         for asset, col in [("stock", S1), ("option", S2)]:
             g = t[t["asset"] == asset]
             if len(g):
                 data.append({"type": "scatter", "mode": "markers", "name": "Stocks" if asset == "stock" else "Options",
-                             "x": g["hold_days"].clip(lower=1 / 1440).round(4).tolist(), "y": g["pnl"].round(2).tolist(),
+                             "x": g["hold_days"].clip(lower=1 / 1440).round(4).tolist(), "y": g[ycol].round(4).tolist(),
                              "text": g["symbol"].tolist(), "marker": {"color": col, "size": 9, "opacity": 0.8,
                                                                        "line": {"color": "var:surface", "width": 1}},
-                             "hovertemplate": "%{text}<br>held %{x:.2f} d<br>%{y:$,.2f}<extra></extra>"})
+                             "hovertemplate": "%{text}<br>held %{x:.2f} d<br>" + hfmt + "<extra></extra>"})
         parts.append(self.fig("f_hold", data, {"xaxis": {"type": "log", "title": {"text": "Days held (log)"}},
-                                               "yaxis": {"tickprefix": "$"}}, 300, title="Holding period vs. P&L"))
+                                               "yaxis": yfmt}, 300,
+                              title="Holding period vs. " + ("return" if self.share else "P&L")))
 
         sy = a.symbols
         if sy is not None and not sy.empty:
@@ -407,7 +444,8 @@ class Report:
                                       "<br>Dividends %{customdata[3]:$,.2f}<extra></extra>"}]
             parts.append(self.fig("f_bysym", data, {"xaxis": {"tickprefix": "$"}, "margin": {"l": 84}},
                                   max(300, 22 * len(s2) + 60), title="Total P&L by underlying",
-                                  subtitle="Realized stock + options + unrealized + dividends."))
+                                  subtitle=("Realized stock + options + dividends (open positions excluded)."
+                                            if self.share else "Realized stock + options + unrealized + dividends.")))
             if "bh_pnl" in s2 and s2["bh_pnl"].notna().any():
                 s3 = s2[s2["bh_pnl"].notna()].sort_values("edge_vs_bh")
                 data = [{"type": "bar", "orientation": "h", "name": "Your P&L", "y": s3.index.tolist(),
@@ -432,13 +470,14 @@ class Report:
                  "hovertemplate": "%{x}: %{y:$,.2f}<br>%{customdata} lots<extra></extra>"}]
         parts.append(self.fig("f_wd", data, {"yaxis": {"tickprefix": "$"}, "bargap": 0.35}, 260,
                               title="Realized P&L by entry weekday"))
-        hr = tt.groupby("hr")["pnl"].agg(["sum", "count"])
-        data = [{"type": "bar", "x": [f"{h:02d}:00" for h in hr.index], "y": hr["sum"].round(2).tolist(),
-                 "customdata": hr["count"].tolist(), "marker": {"color": [_pn(v) for v in hr["sum"]]},
-                 "showlegend": False, "hovertemplate": "%{x} ET: %{y:$,.2f}<br>%{customdata} lots<extra></extra>"}]
-        parts.append(self.fig("f_hr", data, {"yaxis": {"tickprefix": "$"}, "bargap": 0.25}, 260,
-                              title="Realized P&L by entry hour (ET)",
-                              subtitle="Includes overnight-session entries."))
+        if not self.share:  # intraday timing is omitted from shared reports
+            hr = tt.groupby("hr")["pnl"].agg(["sum", "count"])
+            data = [{"type": "bar", "x": [f"{h:02d}:00" for h in hr.index], "y": hr["sum"].round(2).tolist(),
+                     "customdata": hr["count"].tolist(), "marker": {"color": [_pn(v) for v in hr["sum"]]},
+                     "showlegend": False, "hovertemplate": "%{x} ET: %{y:$,.2f}<br>%{customdata} lots<extra></extra>"}]
+            parts.append(self.fig("f_hr", data, {"yaxis": {"tickprefix": "$"}, "bargap": 0.25}, 260,
+                                  title="Realized P&L by entry hour (ET)",
+                                  subtitle="Includes overnight-session entries."))
 
         # gantt
         g = t.copy()
@@ -451,7 +490,9 @@ class Report:
             for _, r in gg.iterrows():
                 xs += [_iso(r["open_time"]), _iso(r["close_time"]), None]
                 ys += [r["y"], r["y"], None]
-                lab = f"{r['symbol']} {r['direction']} ×{r['qty']:g}: {money(r['pnl'], True)}"
+                size = "" if self.share else f" ×{r['qty']:g}"
+                outcome = pct(r["ret"], True) if self.share else money(r["pnl"], True)
+                lab = f"{r['symbol']} {r['direction']}{size}: {outcome}"
                 tx += [lab, lab, None]
             data.append({"type": "scatter", "mode": "lines+markers", "name": name, "x": xs, "y": ys, "text": tx,
                          "line": {"color": col, "width": 5}, "marker": {"size": 8, "color": col},
@@ -466,8 +507,13 @@ class Report:
         show["close_time"] = show["close_time"].map(_iso)
         show.columns = ["Closed", "Symbol", "Asset", "Side", "Qty", "Entry (eff.)", "Exit (eff.)", "How closed",
                         "Days", "Fees", "P&L", "Return"]
-        parts.append('<figure class="card wide"><h3>All closed lots</h3><p class="sub">Click a header to sort. '
-                     'Entry/exit are effective prices: net cash ÷ (qty × multiplier), fees included.</p>'
+        if self.share:
+            # prices + scaled P&L would reveal the scale factor (most option lots are 1 contract)
+            show = show.drop(columns=["Qty", "Entry (eff.)", "Exit (eff.)", "Fees", "P&L"])
+        sub = ("Click a header to sort. Return is on the lot's fee-inclusive cost; per-lot dollar amounts are "
+               "omitted in the shared view." if self.share else
+               "Click a header to sort. Entry/exit are effective prices: net cash ÷ (qty × multiplier), fees included.")
+        parts.append(f'<figure class="card wide"><h3>All closed lots</h3><p class="sub">{sub}</p>'
                      + self.table(show, {"Qty": lambda v: f"{v:g}", "Entry (eff.)": lambda v: num(v, 4),
                                          "Exit (eff.)": lambda v: num(v, 4), "Days": lambda v: num(v, 1),
                                          "Fees": money, "P&L": lambda v: money(v, True), "Return": lambda v: pct(v, True)},
@@ -577,11 +623,13 @@ class Report:
 
         if c["moneyness"].notna().sum() > 3:
             m = c[c["moneyness"].notna()]
-            data = [{"type": "scatter", "mode": "markers", "x": m["moneyness"].round(4).tolist(), "y": m["pnl"].round(2).tolist(),
+            my, myf, mh = ("ror", {"tickformat": "+.0%"}, "%{y:+.0%}") if self.share else \
+                ("pnl", {"tickprefix": "$"}, "%{y:$,.2f}")
+            data = [{"type": "scatter", "mode": "markers", "x": m["moneyness"].round(4).tolist(), "y": m[my].round(4).tolist(),
                      "text": m["legs"].tolist(), "marker": {"color": [_pn(v) for v in m["pnl"]], "size": 9},
-                     "showlegend": False, "hovertemplate": "%{text}<br>moneyness %{x:+.1%}<br>%{y:$,.2f}<extra></extra>"}]
+                     "showlegend": False, "hovertemplate": "%{text}<br>moneyness %{x:+.1%}<br>" + mh + "<extra></extra>"}]
             parts.append(self.fig("f_money", data, {"xaxis": {"tickformat": "+.0%", "title": {"text": "Moneyness at entry (+ = ITM)"}},
-                                                    "yaxis": {"tickprefix": "$"}}, 300, title="Single-leg P&L vs. moneyness at entry"))
+                                                    "yaxis": myf}, 300, title="Single-leg P&L vs. moneyness at entry"))
 
         # rolls
         camp = c[c["campaign"].isin(c.loc[c["rolled_from"].notna(), "campaign"])]
@@ -591,9 +639,12 @@ class Report:
                                               Path=("legs", lambda s: "  →  ".join(s)))
             cg["Start"] = cg["Start"].map(_iso)
             cg = cg.rename(columns={"Legs": "Positions", "PnL": "Total P&L"})
+            if self.share:
+                cg["Total P&L"] = np.sign(cg["Total P&L"]).map({1.0: "gain", -1.0: "loss", 0.0: "flat"})
             parts.append('<figure class="card wide"><h3>Roll chains</h3><p class="sub">A position opened within the '
                          'window of closing another on the same underlying is treated as a roll.</p>'
-                         + self.table(cg.reset_index(drop=True), {"Total P&L": lambda v: money(v, True)}, tid="t_rolls",
+                         + self.table(cg.reset_index(drop=True),
+                                      {} if self.share else {"Total P&L": lambda v: money(v, True)}, tid="t_rolls",
                                       pnl_cols=("Total P&L",)) + '</figure>')
 
         parts.append(self._open_options())
@@ -603,8 +654,11 @@ class Report:
         show["open_time"] = show["open_time"].map(_iso)
         show.columns = ["Opened", "Underlying", "Strategy", "Legs", "DTE", "Net premium", "Max risk", "Outcome",
                         "Days", "P&L", "Return on risk"]
-        parts.append('<figure class="card wide"><h3>All option strategies</h3><p class="sub">Net premium: + credit '
-                     'received / − debit paid, fees included. Open positions include unrealized P&L.</p>'
+        sub = ("Net premium: + credit received / − debit paid, fees included. Open positions include unrealized P&L.")
+        if self.share:
+            show = show.drop(columns=["Net premium", "Max risk", "P&L"])
+            sub = "Return on risk = P&L ÷ max risk at entry. Per-position dollar amounts are omitted in the shared view."
+        parts.append(f'<figure class="card wide"><h3>All option strategies</h3><p class="sub">{sub}</p>'
                      + self.table(show, {"Net premium": lambda v: money(v, True), "Max risk": money,
                                          "Days": lambda v: num(v, 1), "P&L": lambda v: money(v, True),
                                          "Return on risk": lambda v: pct(v, True, 0)},
@@ -725,20 +779,28 @@ class Report:
         a = self.a
         items = []
         rec = a.reconciliation
+        if self.share:
+            if rec is not None:
+                ok = bool(rec["matched"].iloc[0])
+                items.append("<li><b>Ledger vs. broker positions:</b> "
+                             + ("rebuilt positions match the broker exactly." if ok else
+                                "some rebuilt positions differ from the broker (history may be incomplete).") + "</li>")
+            rec = None
         if rec is not None:
             items.append("<li><b>Ledger vs. broker positions:</b> "
                          + ("every open quantity matches Alpaca exactly." if rec.empty else
                             f"{len(rec)} mismatches – history may be incomplete:" + self.table(rec, tid="t_rec"))
                          + "</li>")
         cs = a.cash_summary
-        items.append(f"<li><b>Fees:</b> {money(cs.get('fees', 0))} total; {money(cs.get('fees_in_trades', 0))} folded "
-                     "into fill prices (order-linked fees to their order, daily regulatory fees to that day's fills: "
+        fee_amt = "" if self.share else (f" {money(cs.get('fees', 0))} total; {money(cs.get('fees_in_trades', 0))} "
+                                          "folded into fill prices")
+        items.append(f"<li><b>Fees:</b>{fee_amt or ' folded into fill prices'} (order-linked fees to their order, daily regulatory fees to that day's fills: "
                      "TAF/REG→sells, ORF/OCC→option contracts, CAT→all executions).</li>")
         items.append("<li><b>Assignments & exercises</b> close the option at $0 and deliver stock at the strike, as "
                       "Alpaca books them: the option premium stays on the option, the stock P&L starts at the strike.</li>")
         items.append("<li><b>Returns</b> are time-weighted (Modified Dietz, flows at start of day) so deposits never "
                      "count as performance. Benchmarks are run with the same deposits on the same days.</li>")
-        if a.start:
+        if a.start and not self.share:
             early = a.ledger.closed_df()
             early = early[early["close_time"].dt.date < a.start] if not early.empty else early
             if len(early):

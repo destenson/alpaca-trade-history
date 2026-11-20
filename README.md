@@ -60,6 +60,22 @@ Useful options:
 
 `data/` and `reports/` are git-ignored: your account data stays local.
 
+## Sharing a report publicly (`--share`)
+
+The normal report is a full record of your account. To publish one, build the shared view instead:
+
+```bash
+alpaca-analyzer report --data data/live --out reports/share.html --share --offline
+```
+
+| Kept as-is | Normalized | Removed |
+|---|---|---|
+| Returns, drawdowns, Sharpe/Sortino, β, win rates, return on risk, benchmark comparisons, strategy/DTE/outcome breakdowns, symbols traded, trade dates | Account curves become the growth of $10,000 (`--notional`); aggregate dollar charts are per $10,000 of average equity | Deposits/withdrawals, account size, open positions, payoff diagrams & Greeks, unrealized P&L by name, quantities, intraday times (and the entry-hour chart), per-trade prices, fees and dollar P&L |
+
+Per-trade rows show percentages only. That's deliberate: a dollar amount next to a known contract price
+and a 1-lot trade would let someone back out the normalization factor, and from it your account size.
+Name, email, account number and API keys are never written to any report.
+
 ## How the numbers are computed
 
 * **Effective prices (cost ÷ quantity, fees included).** Every fee is folded into the fill it belongs

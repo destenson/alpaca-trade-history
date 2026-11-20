@@ -19,6 +19,9 @@ from .report import PLOTLY_CDN, render
 def _report(bundle: Bundle, args) -> Path:
     a = analysis.run(bundle, benchmarks=args.benchmarks, combo_window_s=args.combo_window, start=args.start,
                      rf=args.rf)
+    if args.share:
+        from .share import make_shareable
+        a = make_shareable(a, notional=args.notional)
     js = None
     if args.offline:
         with urllib.request.urlopen(PLOTLY_CDN, timeout=60) as r:  # embed plotly.js for offline viewing
@@ -26,7 +29,7 @@ def _report(bundle: Bundle, args) -> Path:
     out = render(a, args.out, inline_js=js)
     for w in a.warnings:
         print(f"note: {w}", file=sys.stderr)
-    if a.stats:
+    if a.stats and not args.share:
         s = a.stats
         print(f"Equity {s.ending_equity:,.2f} | P&L {s.pnl:+,.2f} | TWR {s.total_return:+.2%} | "
               f"max DD {s.max_dd:.2%} | Sharpe {s.sharpe:.2f}")
@@ -52,6 +55,10 @@ def main(argv: list[str] | None = None) -> int:
                        help="seconds within which option legs on one underlying form one strategy (default 120)")
         p.add_argument("--rf", type=float, default=0.0, help="annual risk-free rate for Sharpe/Sortino, e.g. 0.04")
         p.add_argument("--offline", action="store_true", help="embed plotly.js so the HTML works without internet")
+        p.add_argument("--share", action="store_true",
+                       help="publishable version: $ normalized, no deposits, open positions, sizes or trade times")
+        p.add_argument("--notional", type=float, default=10_000.0,
+                       help="account size that --share normalizes dollar figures to (default 10000)")
 
     f = sub.add_parser("fetch", help="download account data into a bundle directory")
     f.add_argument("--out", default="data/live")
