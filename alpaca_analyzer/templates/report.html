@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trading Performance Report</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --series-5: #e87ba4; --series-6: #008300; --series-7: #6250d6; --series-8: #e34948;
+  --gain: #2a78d6; --loss: #e34948; --loss-fill: rgba(227,73,72,0.14);
+  --gain-text: #1c5cab; --loss-text: #b8302f; --accent: #2a78d6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --series-5: #d55181; --series-6: #0ca30c; --series-7: #9085e9; --series-8: #e66767;
+    --gain: #3987e5; --loss: #e66767; --loss-fill: rgba(230,103,103,0.18);
+    --gain-text: #6da7ec; --loss-text: #ee8a8a; --accent: #3987e5;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+  --series-5: #d55181; --series-6: #0ca30c; --series-7: #9085e9; --series-8: #e66767;
+  --gain: #3987e5; --loss: #e66767; --loss-fill: rgba(230,103,103,0.18);
+  --gain-text: #6da7ec; --loss-text: #ee8a8a; --accent: #3987e5;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--page); color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding: 20px 24px 0; max-width: 1360px; margin: 0 auto; display: flex; flex-wrap: wrap;
+  gap: 8px 16px; align-items: baseline; justify-content: space-between; }
+header h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+header .meta { color: var(--ink-2); font-size: 13px; }
+nav { position: sticky; top: 0; z-index: 5; background: var(--page); border-bottom: 1px solid var(--grid); }
+nav .in { max-width: 1360px; margin: 0 auto; padding: 0 16px; display: flex; gap: 2px; overflow-x: auto;
+  scrollbar-width: none; }
+nav a { padding: 12px 12px 10px; color: var(--ink-2); text-decoration: none; white-space: nowrap;
+  border-bottom: 2px solid transparent; font-weight: 500; }
+nav a:hover { color: var(--ink); }
+nav a.on { color: var(--ink); border-bottom-color: var(--accent); }
+nav button { margin-left: auto; background: none; border: 1px solid var(--ring); color: var(--ink-2);
+  border-radius: 6px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; align-self: center; }
+main { max-width: 1360px; margin: 0 auto; padding: 16px 24px 48px; }
+section.tab { display: none; }
+section.tab.on { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+section.tab > h2 { grid-column: 1 / -1; font-size: 16px; margin: 4px 0 0; font-weight: 600; }
+.card { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 14px 16px 10px;
+  margin: 0; min-width: 0; }
+.card.wide, .tiles, .tablewrap.wide { grid-column: 1 / -1; }
+.card h3 { margin: 0 0 2px; font-size: 14px; font-weight: 600; }
+.card .sub { margin: 0 0 8px; color: var(--ink-2); font-size: 12.5px; }
+.card .note { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 12px 14px; }
+.tile .tl { color: var(--ink-2); font-size: 12px; }
+.tile .tv { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.tile .td { color: var(--muted); font-size: 12px; }
+.tablewrap { overflow: auto; max-height: 560px; border-top: 1px solid var(--grid); }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+th { position: sticky; top: 0; background: var(--surface); text-align: left; font-weight: 600; color: var(--ink-2);
+  padding: 7px 10px; border-bottom: 1px solid var(--axis); cursor: pointer; white-space: nowrap; user-select: none; }
+th.asc::after { content: " ▲"; font-size: 9px; } th.desc::after { content: " ▼"; font-size: 9px; }
+td { padding: 6px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+tr:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+td.pos { color: var(--gain-text); } td.neg { color: var(--loss-text); }
+.prose ul { margin: 4px 0; padding-left: 20px; } .prose li { margin: 6px 0; color: var(--ink-2); }
+.prose b { color: var(--ink); }
+.empty { color: var(--muted); }
+.plot { width: 100%; }
+footer { max-width: 1360px; margin: 0 auto; padding: 0 24px 32px; color: var(--muted); font-size: 12px; }
+@media (max-width: 860px) {
+  header, main { padding-left: 16px; padding-right: 16px; }
+  section.tab.on { grid-template-columns: minmax(0, 1fr); }
+  .tile .tv { font-size: 19px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Trading performance</h1>
+  <div class="meta">{{SPAN}} · generated {{GENERATED}}</div>
+</header>
+<nav><div class="in">{{NAV}}<button id="theme" type="button" aria-label="Toggle color theme">Theme</button></div></nav>
+<main>{{BODY}}</main>
+<footer>Built by alpaca-analyzer from Alpaca account activities, portfolio history and market data. Not investment advice.</footer>
+{{PLOTLY}}
+<script>
+const FIGS = {{FIGS}};
+const drawn = new Set();
+function tok(name) { return getComputedStyle(document.documentElement).getPropertyValue('--' + name).trim(); }
+function resolve(v) {
+  if (typeof v === 'string' && v.startsWith('var:')) return tok(v.slice(4));
+  if (Array.isArray(v)) return v.map(resolve);
+  if (v && typeof v === 'object') { const o = {}; for (const k in v) o[k] = resolve(v[k]); return o; }
+  return v;
+}
+function axis(extra) {
+  return Object.assign({ gridcolor: tok('grid'), linecolor: tok('axis'), zerolinecolor: tok('axis'),
+    tickfont: { color: tok('muted'), size: 11 }, title: { font: { color: tok('ink-2'), size: 12 } },
+    automargin: true, showline: false }, extra || {});
+}
+function layoutFor(spec) {
+  const l = resolve(spec.layout);
+  const base = { paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    font: { family: 'system-ui, -apple-system, Segoe UI, sans-serif', color: tok('ink'), size: 12 },
+    legend: { orientation: 'h', y: 1.02, yanchor: 'bottom', x: 0, font: { color: tok('ink-2'), size: 12 } },
+    hoverlabel: { bgcolor: tok('surface'), bordercolor: tok('axis'), font: { color: tok('ink'), size: 12 } } };
+  const out = Object.assign({}, base, l);
+  out.xaxis = axis(Object.assign({ hoverformat: '' }, l.xaxis || {}));
+  out.yaxis = axis(l.yaxis);
+  delete out.xaxis.hoverformat;
+  return out;
+}
+function draw(id) {
+  const el = document.getElementById(id); const spec = FIGS[id];
+  if (!el || !spec || typeof Plotly === 'undefined') return;
+  Plotly.react(el, resolve(spec.data), layoutFor(spec), { displaylogo: false, responsive: true,
+    modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d'] });
+  drawn.add(id);
+}
+function drawVisible() {
+  document.querySelectorAll('section.tab.on .plot').forEach(el => draw(el.id));
+}
+function show(id) {
+  const secs = document.querySelectorAll('section.tab');
+  if (!document.getElementById(id)) id = secs[0] && secs[0].id;
+  secs.forEach(s => s.classList.toggle('on', s.id === id));
+  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.dataset.tab === id));
+  try { localStorage.setItem('aa-tab', id); } catch (e) {}
+  requestAnimationFrame(drawVisible);
+}
+document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', e => {
+  e.preventDefault(); history.replaceState(null, '', '#' + a.dataset.tab); show(a.dataset.tab);
+}));
+document.getElementById('theme').addEventListener('click', () => {
+  const root = document.documentElement;
+  const dark = root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  root.dataset.theme = dark ? 'light' : 'dark';
+  try { localStorage.setItem('aa-theme', root.dataset.theme); } catch (e) {}
+  drawn.clear(); drawVisible();
+});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { drawn.clear(); drawVisible(); });
+// sortable tables
+document.querySelectorAll('table.sortable').forEach(t => {
+  t.querySelectorAll('th').forEach((th, i) => th.addEventListener('click', () => {
+    const asc = !th.classList.contains('asc');
+    t.querySelectorAll('th').forEach(h => h.classList.remove('asc', 'desc'));
+    th.classList.add(asc ? 'asc' : 'desc');
+    const rows = Array.from(t.tBodies[0].rows);
+    const val = r => { const v = r.cells[i].dataset.v; const n = parseFloat(v); return isNaN(n) || !/^-?[\d.e+-]+$/.test(v) ? v : n; };
+    rows.sort((a, b) => { const x = val(a), y = val(b);
+      const c = (typeof x === 'number' && typeof y === 'number') ? x - y : String(x).localeCompare(String(y));
+      return asc ? c : -c; });
+    rows.forEach(r => t.tBodies[0].appendChild(r));
+  }));
+});
+try { const th = localStorage.getItem('aa-theme'); if (th) document.documentElement.dataset.theme = th; } catch (e) {}
+let start = location.hash.slice(1);
+try { start = start || localStorage.getItem('aa-tab'); } catch (e) {}
+show(start || 'overview');
+</script>
+</body>
+</html>

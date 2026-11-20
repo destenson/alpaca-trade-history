@@ -1,0 +1,831 @@
+"""Render an :class:`~alpaca_analyzer.analysis.Analysis` to one self-contained HTML file.
+
+Charts are emitted as Plotly JSON specs. Colors are written as ``var:<token>`` and resolved
+in the browser from CSS custom properties, so the whole report follows light/dark mode.
+"""
+from __future__ import annotations
+
+import html
+import json
+import math
+from datetime import date, datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from .analysis import Analysis
+from .ledger import NY
+from .occ import parse_occ
+from .optionsmath import payoff_curves
+
+PLOTLY_CDN = "https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"
+TEMPLATE = Path(__file__).with_name("templates") / "report.html"
+
+S1, S2, S3, S4, S5, S6, S7, S8 = (f"var:series-{i}" for i in range(1, 9))
+GAIN, LOSS, NEUTRAL = "var:gain", "var:loss", "var:muted"
+
+
+# ------------------------------------------------------------------ formatting
+def _num(x):
+    return None if x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x))) else x
+
+
+def money(x, signed=False, dp=2):
+    if x is None or (isinstance(x, float) and math.isnan(x)):
+        return "–"
+    s = f"{abs(x):,.{dp}f}"
+    sign = "−" if x < 0 else ("+" if signed and x > 0 else "")
+    return f"{sign}${s}"
+
+
+def pct(x, signed=False, dp=1):
+    if x is None or (isinstance(x, float) and math.isnan(x)):
+        return "–"
+    sign = "−" if x < 0 else ("+" if signed and x > 0 else "")
+    return f"{sign}{abs(x) * 100:,.{dp}f}%"
+
+
+def num(x, dp=2):
+    if x is None or (isinstance(x, float) and math.isnan(x)):
+        return "–"
+    return f"{x:,.{dp}f}".replace("-", "−")
+
+
+def _iso(d):
+    if isinstance(d, (pd.Timestamp, datetime)):
+        return pd.Timestamp(d).tz_convert(NY).strftime("%Y-%m-%d %H:%M") if pd.Timestamp(d).tzinfo else pd.Timestamp(d).strftime("%Y-%m-%d")
+    return d.isoformat() if isinstance(d, date) else str(d)
+
+
+def _pn(v):
+    return GAIN if v >= 0 else LOSS
+
+
+# --------------------------------------------------------------------- builder
+class Report:
+    def __init__(self, a: Analysis):
+        self.a = a
+        self.figs: dict[str, dict] = {}
+        self.sections: list[tuple[str, str, str]] = []   # (id, title, html)
+
+    # -- primitives ---------------------------------------------------------
+    def fig(self, fid: str, data: list, layout: dict | None = None, height: int = 320, note: str = "",
+            title: str = "", subtitle: str = "", wide: bool = False) -> str:
+        lay = {"height": height, "margin": {"l": 56, "r": 16, "t": 12, "b": 40}, "hovermode": "closest",
+               "showlegend": len([d for d in data if d.get("showlegend", True)]) > 1}
+        lay.update(layout or {})
+        self.figs[fid] = {"data": data, "layout": lay}
+        head = f'<h3>{html.escape(title)}</h3>' if title else ""
+        sub = f'<p class="sub">{subtitle}</p>' if subtitle else ""
+        foot = f'<p class="note">{note}</p>' if note else ""
+        return f'<figure class="card{" wide" if wide else ""}">{head}{sub}<div class="plot" id="{fid}"></div>{foot}</figure>'
+
+    @staticmethod
+    def tiles(items: list[tuple[str, str, str]]) -> str:
+        """items: (label, value, detail) - detail may contain a delta class marker."""
+        out = []
+        for label, value, detail in items:
+            out.append(f'<div class="tile"><div class="tl">{html.escape(label)}</div>'
+                       f'<div class="tv">{value}</div><div class="td">{detail}</div></div>')
+        return f'<div class="tiles">{"".join(out)}</div>'
+
+    @staticmethod
+    def table(df: pd.DataFrame, fmt: dict | None = None, tid: str = "", max_rows: int | None = None,
+              pnl_cols: tuple = ()) -> str:
+        fmt = fmt or {}
+        if df is None or df.empty:
+            return '<p class="empty">No rows.</p>'
+        rows = df if max_rows is None else df.head(max_rows)
+        th = "".join(f'<th data-k="{i}">{html.escape(str(c))}</th>' for i, c in enumerate(rows.columns))
+        body = []
+        for _, r in rows.iterrows():
+            tds = []
+            for c in rows.columns:
+                v = r[c]
+                f = fmt.get(c)
+                txt = f(v) if f else ("–" if v is None or (isinstance(v, float) and math.isnan(v)) else str(v))
+                raw = v if isinstance(v, (int, float, np.integer, np.floating)) and not (isinstance(v, float) and math.isnan(v)) else txt
+                cls = ""
+                if c in pnl_cols and isinstance(v, (int, float, np.floating)) and not math.isnan(v):
+                    cls = ' class="pos"' if v > 0 else ' class="neg"' if v < 0 else ""
+                tds.append(f'<td data-v="{html.escape(str(raw))}"{cls}>{html.escape(txt)}</td>')
+            body.append("<tr>" + "".join(tds) + "</tr>")
+        return (f'<div class="tablewrap"><table class="sortable" id="{tid}"><thead><tr>{th}</tr></thead>'
+                f'<tbody>{"".join(body)}</tbody></table></div>')
+
+    def section(self, sid: str, title: str, body: str):
+        self.sections.append((sid, title, body))
+
+    # -- render -------------------------------------------------------------
+    def render(self, path: str | Path, inline_js: str | None = None) -> Path:
+        self.build()
+        tpl = TEMPLATE.read_text()
+        nav = "".join(f'<a href="#{sid}" data-tab="{sid}">{html.escape(t)}</a>' for sid, t, _ in self.sections)
+        body = "".join(f'<section id="{sid}" class="tab"><h2>{html.escape(t)}</h2>{b}</section>'
+                       for sid, t, b in self.sections)
+        a = self.a
+        span = ""
+        if a.equity is not None:
+            span = f"{a.equity.index[0]:%b %d, %Y} – {a.equity.index[-1]:%b %d, %Y}"
+        script = f'<script>{inline_js}</script>' if inline_js else f'<script src="{PLOTLY_CDN}"></script>'
+        out = (tpl.replace("{{NAV}}", nav).replace("{{BODY}}", body).replace("{{SPAN}}", html.escape(span))
+               .replace("{{GENERATED}}", datetime.now().strftime("%Y-%m-%d %H:%M"))
+               .replace("{{PLOTLY}}", script)
+               .replace("{{FIGS}}", json.dumps(_clean(self.figs), default=_json_default, allow_nan=False)
+                        .replace("</", "<\\/")))
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(out)
+        return p
+
+    # ======================================================================
+    def build(self):
+        self._overview()
+        self._performance()
+        self._drawdown()
+        self._trades()
+        self._options()
+        self._positions()
+        self._notes()
+
+    # ------------------------------------------------------------- overview
+    def _overview(self):
+        a, st = self.a, self.a.stats
+        t = a.trades
+        parts = []
+        if st:
+            bs = a.bench_stats.get(a.primary_benchmark)
+            vs = (st.total_return - bs.total_return) if bs else math.nan
+            parts.append(self.tiles([
+                ("Equity", money(st.ending_equity, dp=0), f"Net deposits {money(st.net_deposits, dp=0)}"),
+                ("Total P&L", money(st.pnl, signed=True, dp=0), f"Time-weighted {pct(st.total_return, True)}"),
+                (f"vs {a.primary_benchmark}", pct(vs, True), f"{a.primary_benchmark} {pct(bs.total_return, True) if bs else '–'}"
+                 f" · same deposits {money(bs.pnl, True, 0) if bs else '–'}"),
+                ("Max drawdown", pct(st.max_dd), f"{money(st.max_dd_dollar, dp=0)} peak-to-trough P&L"),
+                ("Sharpe", num(st.sharpe), f"Sortino {num(st.sortino)} · vol {pct(st.vol, dp=0)}"),
+                ("Win rate", pct((t['pnl'] > 0).mean() if len(t) else math.nan, dp=0),
+                 f"{len(t)} closed lots · PF {num(_profit_factor(t))}"),
+            ]))
+        if a.equity is not None:
+            e = a.equity
+            x = [_iso(d) for d in e.index]
+            data = [
+                {"type": "scatter", "mode": "lines", "name": "Account equity", "x": x, "y": e["equity"].round(2).tolist(),
+                 "line": {"color": S1, "width": 2}, "hovertemplate": "%{x}<br>Equity $%{y:,.2f}<extra></extra>"},
+                {"type": "scatter", "mode": "lines", "name": "Net deposits", "x": x, "y": e["net_deposits"].round(2).tolist(),
+                 "line": {"color": NEUTRAL, "width": 2, "shape": "hv", "dash": "dot"},
+                 "hovertemplate": "%{x}<br>Deposits $%{y:,.2f}<extra></extra>"},
+            ]
+            for i, (sym, bf) in enumerate(a.bench.items()):
+                data.append({"type": "scatter", "mode": "lines", "name": f"{sym} with same deposits", "x": x,
+                             "y": bf["value"].round(2).tolist(), "line": {"color": [S2, S3, S4][i % 3], "width": 2},
+                             "hovertemplate": f"%{{x}}<br>{sym} $%{{y:,.2f}}<extra></extra>"})
+            parts.append(self.fig("f_equity", data, {"yaxis": {"tickprefix": "$"}, "hovermode": "x unified"}, 360,
+                                  title="Equity vs. deposits vs. benchmarks",
+                                  subtitle="Benchmarks buy the benchmark with every deposit on the day it lands, so "
+                                           "dollar values are directly comparable.", wide=True))
+            parts.append(self._waterfall())
+        self.section("overview", "Overview", "".join(parts))
+
+    def _waterfall(self) -> str:
+        a = self.a
+        start = a.equity.index[0]
+        t = a.trades[a.trades["close_time"].dt.date >= start]
+        op = a.open_positions
+        cs = a.cash_summary
+        items = [("Stocks realized", t.loc[t["asset"] == "stock", "pnl"].sum()),
+                 ("Options realized", t.loc[t["asset"] == "option", "pnl"].sum()),
+                 ("Unrealized", op["unrealized_pl"].sum(min_count=1) if not op.empty else 0.0),
+                 ("Dividends", cs.get("income", 0.0)),
+                 ("Margin interest", cs.get("interest", 0.0))]
+        items = [(k, float(0 if pd.isna(v) else v)) for k, v in items]
+        explained = sum(v for _, v in items)
+        resid = a.stats.pnl - explained
+        items.append(("Other / timing", resid))
+        x = [k for k, _ in items] + ["Account P&L"]
+        y = [round(v, 2) for _, v in items] + [round(a.stats.pnl, 2)]
+        data = [{"type": "waterfall", "x": x, "y": y, "measure": ["relative"] * len(items) + ["total"],
+                 "connector": {"line": {"color": "var:grid", "width": 1}},
+                 "increasing": {"marker": {"color": GAIN}}, "decreasing": {"marker": {"color": LOSS}},
+                 "totals": {"marker": {"color": S1}}, "text": [money(v, True, 0) for v in y],
+                 "textposition": "outside", "cliponaxis": False,
+                 "hovertemplate": "%{x}<br>%{y:$,.2f}<extra></extra>", "showlegend": False}]
+        fee_note = (f"Fees ({money(cs.get('fees', 0))}) are already inside the realized/unrealized bars: each fill's "
+                    f"price is its effective price (cost ÷ quantity, fees included).")
+        return self.fig("f_waterfall", data, {"yaxis": {"tickprefix": "$"}}, 340, title="Where the P&L came from",
+                        subtitle="Since the start of the equity history. " + fee_note,
+                        note="“Other / timing” is what the ledger can’t attribute: unpriced positions (e.g. "
+                             "spin-offs), mark timing and rounding.", wide=True)
+
+    # ---------------------------------------------------------- performance
+    def _performance(self):
+        a = self.a
+        if a.equity is None:
+            return
+        e = a.equity
+        x = [_iso(d) for d in e.index]
+        parts = []
+        data = [{"type": "scatter", "mode": "lines", "name": "Portfolio", "x": x, "y": (e["twr"] - 1).round(5).tolist(),
+                 "line": {"color": S1, "width": 2}}]
+        for i, (sym, bf) in enumerate(a.bench.items()):
+            data.append({"type": "scatter", "mode": "lines", "name": sym, "x": x, "y": (bf["twr"] - 1).round(5).tolist(),
+                         "line": {"color": [S2, S3, S4][i % 3], "width": 2}})
+        parts.append(self.fig("f_twr", data, {"yaxis": {"tickformat": "+.0%"}, "hovermode": "x unified"}, 340,
+                              title="Time-weighted return", subtitle="Deposits removed (Modified Dietz, daily) – "
+                              "this is the skill-only comparison against simply holding the index.", wide=True))
+
+        data = [{"type": "scatter", "mode": "lines", "name": "Your cumulative P&L", "x": x,
+                 "y": e["cum_pnl"].round(2).tolist(), "line": {"color": S1, "width": 2}}]
+        for i, (sym, bf) in enumerate(a.bench.items()):
+            data.append({"type": "scatter", "mode": "lines", "name": f"{sym} buy & hold P&L", "x": x,
+                         "y": bf["cum_pnl"].round(2).tolist(), "line": {"color": [S2, S3, S4][i % 3], "width": 2}})
+        parts.append(self.fig("f_cumpnl", data, {"yaxis": {"tickprefix": "$"}, "hovermode": "x unified"}, 320,
+                              title="Cumulative P&L in dollars vs. buy & hold"))
+
+        data = [{"type": "bar", "x": x, "y": e["pnl"].round(2).tolist(), "name": "Daily P&L",
+                 "marker": {"color": [_pn(v) for v in e["pnl"]]},
+                 "hovertemplate": "%{x}<br>%{y:$,.2f}<extra></extra>", "showlegend": False}]
+        parts.append(self.fig("f_daily", data, {"yaxis": {"tickprefix": "$"}, "bargap": 0.15}, 280,
+                              title="Daily P&L", subtitle=f"{pct(a.stats.pct_up_days, dp=0)} of days were up · best "
+                              f"{pct(a.stats.best_day, True)} · worst {pct(a.stats.worst_day, True)}"))
+
+        m = a.monthly
+        if m is not None and len(m):
+            mx = [f"{d:%b %Y}" for d in m.index]
+            data = [{"type": "bar", "name": "Portfolio", "x": mx, "y": m["ret"].round(5).tolist(),
+                     "marker": {"color": S1}, "hovertemplate": "%{x}<br>%{y:+.1%}<extra>Portfolio</extra>"}]
+            pb = a.bench.get(a.primary_benchmark)
+            if pb is not None:
+                br = (1 + pb["ret"].set_axis(pd.to_datetime(pd.Index(pb.index)))).resample("ME").prod() - 1
+                data.append({"type": "bar", "name": a.primary_benchmark, "x": mx,
+                             "y": br.reindex(m.index).round(5).tolist(), "marker": {"color": S2},
+                             "hovertemplate": f"%{{x}}<br>%{{y:+.1%}}<extra>{a.primary_benchmark}</extra>"})
+            parts.append(self.fig("f_monthly", data, {"yaxis": {"tickformat": "+.0%"}, "barmode": "group",
+                                                      "bargap": 0.3, "bargroupgap": 0.08}, 280,
+                                  title="Monthly returns"))
+
+        pb = a.bench.get(a.primary_benchmark)
+        if pb is not None:
+            r = e["ret"].iloc[1:]
+            b = pb["ret"].reindex(r.index).fillna(0)
+            st = a.stats
+            xs = np.linspace(b.min(), b.max(), 20)
+            data = [{"type": "scatter", "mode": "markers", "name": "Days", "x": b.round(5).tolist(), "y": r.round(5).tolist(),
+                     "text": [_iso(d) for d in r.index], "marker": {"color": S1, "size": 8, "opacity": 0.75,
+                                                                    "line": {"color": "var:surface", "width": 1}},
+                     "hovertemplate": "%{text}<br>" + a.primary_benchmark + " %{x:+.2%}<br>You %{y:+.2%}<extra></extra>"},
+                    {"type": "scatter", "mode": "lines", "name": f"β = {num(st.beta)}", "x": xs.tolist(),
+                     "y": (st.alpha / 252 + st.beta * xs).tolist(), "line": {"color": S2, "width": 2}}]
+            parts.append(self.fig("f_beta", data, {"xaxis": {"tickformat": "+.1%", "title": {"text": f"{a.primary_benchmark} daily return"}},
+                                                   "yaxis": {"tickformat": "+.0%", "title": {"text": "Your daily return"}}}, 340,
+                                  title=f"Daily returns vs. {a.primary_benchmark}",
+                                  subtitle=f"β {num(st.beta)} · correlation {num(st.correlation)} · annualized α "
+                                           f"{pct(st.alpha, True)} · up-capture {pct(st.up_capture, dp=0)} · "
+                                           f"down-capture {pct(st.down_capture, dp=0)}"))
+
+        ro = a.rolling
+        if ro is not None and ro["vol"].notna().sum() > 2:
+            data = [{"type": "scatter", "mode": "lines", "name": "Rolling vol (21d, ann.)", "x": x,
+                     "y": [_num(v) for v in ro["vol"].round(4)], "line": {"color": S1, "width": 2}, "showlegend": False}]
+            parts.append(self.fig("f_rvol", data, {"yaxis": {"tickformat": ".0%"}}, 240,
+                                  title="Rolling 21-day volatility (annualized)"))
+            data = [{"type": "scatter", "mode": "lines", "name": "Rolling Sharpe", "x": x,
+                     "y": [_num(v) for v in ro["sharpe"].round(3)], "line": {"color": S1, "width": 2}, "showlegend": False}]
+            parts.append(self.fig("f_rsharpe", data, {}, 240, title="Rolling 21-day Sharpe"))
+            if "beta" in ro:
+                data = [{"type": "scatter", "mode": "lines", "name": "Rolling beta", "x": x,
+                         "y": [_num(v) for v in ro["beta"].round(3)], "line": {"color": S1, "width": 2}, "showlegend": False}]
+                parts.append(self.fig("f_rbeta", data, {}, 240, title=f"Rolling 21-day beta to {a.primary_benchmark}"))
+
+        rows = []
+        for name, s in [("Portfolio", a.stats)] + [(k, v) for k, v in a.bench_stats.items()]:
+            rows.append({"": name, "Total return": pct(s.total_return, True), "Annualized": pct(s.cagr, True),
+                         "Volatility": pct(s.vol), "Sharpe": num(s.sharpe), "Sortino": num(s.sortino),
+                         "Max drawdown": pct(s.max_dd), "Calmar": num(s.calmar),
+                         "P&L on your deposits": money(s.pnl, True)})
+        parts.append('<figure class="card wide"><h3>Risk & return summary</h3>'
+                     '<p class="sub">Benchmarks are run with your exact deposit dates and amounts. '
+                     'Short histories make annualized numbers noisy – read them as direction, not forecast.</p>'
+                     + self.table(pd.DataFrame(rows), tid="t_riskret") + '</figure>')
+        self.section("performance", "Performance", "".join(parts))
+
+    # ------------------------------------------------------------- drawdown
+    def _drawdown(self):
+        a = self.a
+        if a.equity is None:
+            return
+        e = a.equity
+        x = [_iso(d) for d in e.index]
+        data = [{"type": "scatter", "mode": "lines", "name": "Portfolio", "x": x, "y": e["dd"].round(5).tolist(),
+                 "fill": "tozeroy", "line": {"color": LOSS, "width": 2}, "fillcolor": "var:loss-fill"}]
+        for i, (sym, bf) in enumerate(a.bench.items()):
+            data.append({"type": "scatter", "mode": "lines", "name": sym, "x": x, "y": bf["dd"].round(5).tolist(),
+                         "line": {"color": [S2, S3, S4][i % 3], "width": 2}})
+        parts = [self.fig("f_underwater", data, {"yaxis": {"tickformat": ".0%"}, "hovermode": "x unified"}, 320,
+                          title="Underwater curve (time-weighted)",
+                          subtitle="Distance below the running peak of the deposit-neutral return index.", wide=True)]
+        data = [{"type": "scatter", "mode": "lines", "name": "Dollar drawdown", "x": x, "y": e["dd_dollar"].round(2).tolist(),
+                 "fill": "tozeroy", "line": {"color": LOSS, "width": 2}, "fillcolor": "var:loss-fill", "showlegend": False}]
+        parts.append(self.fig("f_dd_dollar", data, {"yaxis": {"tickprefix": "$"}}, 260,
+                              title="Dollar drawdown of cumulative P&L"))
+        dd = a.drawdowns
+        if dd is not None and not dd.empty:
+            show = dd.assign(peak=dd["peak"].map(_iso), trough=dd["trough"].map(_iso),
+                             recovered=dd["recovered"].map(lambda v: _iso(v) if v is not None and not pd.isna(v) else "not yet"))
+            show = show.rename(columns={"peak": "Peak", "trough": "Trough", "recovered": "Recovered",
+                                        "depth": "Depth", "length_days": "Days"})
+            parts.append('<figure class="card"><h3>Worst drawdowns</h3>'
+                         + self.table(show, {"Depth": pct}, tid="t_dd") + '</figure>')
+        self.section("drawdown", "Drawdown", "".join(parts))
+
+    # --------------------------------------------------------------- trades
+    def _trades(self):
+        a = self.a
+        t = a.trades.sort_values("close_time")
+        if t.empty:
+            return
+        parts = []
+        w, l = t[t["pnl"] > 0], t[t["pnl"] < 0]
+        streak_w, streak_l = _streaks(t["pnl"])
+        parts.append(self.tiles([
+            ("Realized P&L", money(t["pnl"].sum(), True, 0), f"{len(t)} closed lots · fees {money(t['fees'].sum())}"),
+            ("Win rate", pct(len(w) / len(t), dp=0), f"{len(w)} wins / {len(l)} losses"),
+            ("Avg win / loss", f"{money(w['pnl'].mean(), dp=0)} / {money(l['pnl'].mean(), dp=0)}",
+             f"payoff ratio {num(abs(w['pnl'].mean() / l['pnl'].mean()) if len(l) and len(w) else math.nan)}"),
+            ("Profit factor", num(_profit_factor(t)), f"expectancy {money(t['pnl'].mean(), True)} per lot"),
+            ("Largest win / loss", f"{money(t['pnl'].max(), dp=0)} / {money(t['pnl'].min(), dp=0)}",
+             f"streaks: {streak_w} wins · {streak_l} losses"),
+            ("Median hold", _dur(t["hold_days"].median()), f"mean {_dur(t['hold_days'].mean())}"),
+        ]))
+
+        data = []
+        for i, (asset, col) in enumerate([("stock", S1), ("option", S2)]):
+            g = t[t["asset"] == asset]
+            if len(g):
+                data.append({"type": "scatter", "mode": "lines", "name": "Stocks" if asset == "stock" else "Options",
+                             "x": [_iso(v) for v in g["close_time"]], "y": g["pnl"].cumsum().round(2).tolist(),
+                             "line": {"color": col, "width": 2, "shape": "hv"}})
+        data.append({"type": "scatter", "mode": "lines", "name": "All", "x": [_iso(v) for v in t["close_time"]],
+                     "y": t["pnl"].cumsum().round(2).tolist(), "line": {"color": S3, "width": 2, "shape": "hv"}})
+        parts.append(self.fig("f_cumreal", data, {"yaxis": {"tickprefix": "$"}}, 320, title="Cumulative realized P&L",
+                              subtitle="Stepped at each close; FIFO lot matching, fees included.", wide=True))
+
+        bins = _nice_bins(t["pnl"])
+        counts, edges = np.histogram(t["pnl"], bins=bins)
+        centers = (edges[:-1] + edges[1:]) / 2
+        data = [{"type": "bar", "x": centers.round(2).tolist(), "y": counts.tolist(), "width": (np.diff(edges) * 0.9).tolist(),
+                 "marker": {"color": [_pn(c) for c in centers]}, "showlegend": False,
+                 "customdata": np.c_[edges[:-1], edges[1:]].round(0).tolist(),
+                 "hovertemplate": "$%{customdata[0]:,} to $%{customdata[1]:,}<br>%{y} lots<extra></extra>"}]
+        parts.append(self.fig("f_hist", data, {"xaxis": {"tickprefix": "$"}, "yaxis": {"title": {"text": "Lots"}}}, 280,
+                              title="P&L distribution per closed lot"))
+
+        data = []
+        for asset, col in [("stock", S1), ("option", S2)]:
+            g = t[t["asset"] == asset]
+            if len(g):
+                data.append({"type": "scatter", "mode": "markers", "name": "Stocks" if asset == "stock" else "Options",
+                             "x": g["hold_days"].clip(lower=1 / 1440).round(4).tolist(), "y": g["pnl"].round(2).tolist(),
+                             "text": g["symbol"].tolist(), "marker": {"color": col, "size": 9, "opacity": 0.8,
+                                                                       "line": {"color": "var:surface", "width": 1}},
+                             "hovertemplate": "%{text}<br>held %{x:.2f} d<br>%{y:$,.2f}<extra></extra>"})
+        parts.append(self.fig("f_hold", data, {"xaxis": {"type": "log", "title": {"text": "Days held (log)"}},
+                                               "yaxis": {"tickprefix": "$"}}, 300, title="Holding period vs. P&L"))
+
+        sy = a.symbols
+        if sy is not None and not sy.empty:
+            s2 = sy.sort_values("total_pnl")
+            data = [{"type": "bar", "orientation": "h", "y": s2.index.tolist(), "x": s2["total_pnl"].round(2).tolist(),
+                     "marker": {"color": [_pn(v) for v in s2["total_pnl"]]}, "showlegend": False,
+                     "customdata": s2[["stock_pnl", "option_pnl", "unrealized", "dividends"]].round(2).values.tolist(),
+                     "hovertemplate": "<b>%{y}</b><br>Total %{x:$,.2f}<br>Stock realized %{customdata[0]:$,.2f}"
+                                      "<br>Options realized %{customdata[1]:$,.2f}<br>Unrealized %{customdata[2]:$,.2f}"
+                                      "<br>Dividends %{customdata[3]:$,.2f}<extra></extra>"}]
+            parts.append(self.fig("f_bysym", data, {"xaxis": {"tickprefix": "$"}, "margin": {"l": 84}},
+                                  max(300, 22 * len(s2) + 60), title="Total P&L by underlying",
+                                  subtitle="Realized stock + options + unrealized + dividends."))
+            if "bh_pnl" in s2 and s2["bh_pnl"].notna().any():
+                s3 = s2[s2["bh_pnl"].notna()].sort_values("edge_vs_bh")
+                data = [{"type": "bar", "orientation": "h", "name": "Your P&L", "y": s3.index.tolist(),
+                         "x": s3["total_pnl"].round(2).tolist(), "marker": {"color": S1}},
+                        {"type": "bar", "orientation": "h", "name": "Buy & hold P&L", "y": s3.index.tolist(),
+                         "x": s3["bh_pnl"].round(2).tolist(), "marker": {"color": S2},
+                         "customdata": s3[["peak_capital", "bh_return"]].values.tolist(),
+                         "hovertemplate": "%{y}: %{x:$,.2f}<br>%{customdata[0]:$,.0f} held from first trade"
+                                          " (%{customdata[1]:+.1%})<extra>Buy & hold</extra>"}]
+                parts.append(self.fig("f_edge", data, {"barmode": "group", "xaxis": {"tickprefix": "$"},
+                                                       "margin": {"l": 84}, "bargap": 0.25},
+                                      max(300, 30 * len(s3) + 80), title="Your trading vs. just holding the underlying",
+                                      subtitle="Buy & hold = your peak capital committed to that name, bought on your first "
+                                               "trade date and held to today. Sorted by your edge."))
+
+        # timing
+        tt = t.assign(wd=t["open_time"].dt.dayofweek, hr=t["open_time"].dt.hour)
+        wd = tt.groupby("wd")["pnl"].agg(["sum", "count"]).reindex(range(5), fill_value=0)
+        names = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+        data = [{"type": "bar", "x": names, "y": wd["sum"].round(2).tolist(), "customdata": wd["count"].tolist(),
+                 "marker": {"color": [_pn(v) for v in wd["sum"]]}, "showlegend": False,
+                 "hovertemplate": "%{x}: %{y:$,.2f}<br>%{customdata} lots<extra></extra>"}]
+        parts.append(self.fig("f_wd", data, {"yaxis": {"tickprefix": "$"}, "bargap": 0.35}, 260,
+                              title="Realized P&L by entry weekday"))
+        hr = tt.groupby("hr")["pnl"].agg(["sum", "count"])
+        data = [{"type": "bar", "x": [f"{h:02d}:00" for h in hr.index], "y": hr["sum"].round(2).tolist(),
+                 "customdata": hr["count"].tolist(), "marker": {"color": [_pn(v) for v in hr["sum"]]},
+                 "showlegend": False, "hovertemplate": "%{x} ET: %{y:$,.2f}<br>%{customdata} lots<extra></extra>"}]
+        parts.append(self.fig("f_hr", data, {"yaxis": {"tickprefix": "$"}, "bargap": 0.25}, 260,
+                              title="Realized P&L by entry hour (ET)",
+                              subtitle="Includes overnight-session entries."))
+
+        # gantt
+        g = t.copy()
+        g["y"] = g["underlying"]
+        order = g.groupby("y")["open_time"].min().sort_values(ascending=False).index.tolist()
+        data = []
+        for sign, col, name in [(1, GAIN, "Winning lot"), (-1, LOSS, "Losing lot")]:
+            gg = g[(g["pnl"] >= 0) if sign > 0 else (g["pnl"] < 0)]
+            xs, ys, tx = [], [], []
+            for _, r in gg.iterrows():
+                xs += [_iso(r["open_time"]), _iso(r["close_time"]), None]
+                ys += [r["y"], r["y"], None]
+                lab = f"{r['symbol']} {r['direction']} ×{r['qty']:g}: {money(r['pnl'], True)}"
+                tx += [lab, lab, None]
+            data.append({"type": "scatter", "mode": "lines+markers", "name": name, "x": xs, "y": ys, "text": tx,
+                         "line": {"color": col, "width": 5}, "marker": {"size": 8, "color": col},
+                         "hovertemplate": "%{text}<extra></extra>", "connectgaps": False})
+        parts.append(self.fig("f_gantt", data, {"yaxis": {"categoryorder": "array", "categoryarray": order},
+                                                "margin": {"l": 84}}, max(320, 20 * len(order) + 80),
+                              title="Trade timeline", subtitle="Each bar is one closed lot from entry to exit.",
+                              wide=True))
+
+        show = t[["close_time", "symbol", "asset", "direction", "qty", "open_price", "close_price", "close_kind",
+                  "hold_days", "fees", "pnl", "ret"]].sort_values("close_time", ascending=False).copy()
+        show["close_time"] = show["close_time"].map(_iso)
+        show.columns = ["Closed", "Symbol", "Asset", "Side", "Qty", "Entry (eff.)", "Exit (eff.)", "How closed",
+                        "Days", "Fees", "P&L", "Return"]
+        parts.append('<figure class="card wide"><h3>All closed lots</h3><p class="sub">Click a header to sort. '
+                     'Entry/exit are effective prices: net cash ÷ (qty × multiplier), fees included.</p>'
+                     + self.table(show, {"Qty": lambda v: f"{v:g}", "Entry (eff.)": lambda v: num(v, 4),
+                                         "Exit (eff.)": lambda v: num(v, 4), "Days": lambda v: num(v, 1),
+                                         "Fees": money, "P&L": lambda v: money(v, True), "Return": lambda v: pct(v, True)},
+                                  tid="t_trades", pnl_cols=("P&L", "Return")) + '</figure>')
+        self.section("trades", "Trades", "".join(parts))
+
+    # -------------------------------------------------------------- options
+    def _options(self):
+        a = self.a
+        c = a.combos
+        if c is None or c.empty:
+            return
+        parts = []
+        done = c[~c["is_open"]]
+        wins = done[done["pnl"] > 0]
+        parts.append(self.tiles([
+            ("Options P&L", money(c["pnl"].sum(), True, 0),
+             f"realized {money(c['realized_pnl'].sum(), True, 0)} · open {money(c['unrealized_pnl'].sum(), True, 0)}"),
+            ("Strategies", str(len(c)), f"{len(done)} closed · {int(c['is_open'].sum())} open · "
+                                        f"{int(c['rolled_from'].notna().sum())} rolls"),
+            ("Win rate", pct(len(wins) / len(done) if len(done) else math.nan, dp=0),
+             f"avg win {money(wins['pnl'].mean(), dp=0)} · avg loss {money(done[done['pnl'] <= 0]['pnl'].mean(), dp=0)}"),
+            ("Median return on risk", pct(done["ror"].median(), True, 0), "defined-risk positions only"),
+            ("Premium", f"{money(-c.loc[c['net_premium'] < 0, 'net_premium'].sum(), dp=0)} paid",
+             f"{money(c.loc[c['net_premium'] > 0, 'net_premium'].sum(), dp=0)} collected"),
+            ("Median DTE at entry", f"{c['dte'].median():.0f} d", f"median hold {_dur(done['hold_days'].median())}"),
+        ]))
+
+        by = c.groupby("strategy").agg(pnl=("pnl", "sum"), n=("pnl", "size"), wins=("pnl", lambda s: (s > 0).sum()),
+                                       avg=("pnl", "mean"), ror=("ror", "median")).sort_values("pnl")
+        data = [{"type": "bar", "orientation": "h", "y": by.index.tolist(), "x": by["pnl"].round(2).tolist(),
+                 "marker": {"color": [_pn(v) for v in by["pnl"]]}, "showlegend": False,
+                 "customdata": np.c_[by["n"], by["wins"] / by["n"], by["avg"]].round(3).tolist(),
+                 "hovertemplate": "<b>%{y}</b><br>%{x:$,.2f} over %{customdata[0]} trades<br>win rate "
+                                  "%{customdata[1]:.0%}<br>avg %{customdata[2]:$,.2f}<extra></extra>"}]
+        parts.append(self.fig("f_strat", data, {"xaxis": {"tickprefix": "$"}, "margin": {"l": 170}},
+                              max(260, 30 * len(by) + 60), title="P&L by strategy",
+                              subtitle="Legs opened within the grouping window on one underlying form a strategy; "
+                                       "covered calls are detected from shares held at entry."))
+
+        # cumulative by strategy (top 5 + other)
+        top = c.groupby("strategy")["pnl"].apply(lambda s: s.abs().sum()).sort_values(ascending=False).index[:5]
+        cc = c.assign(grp=np.where(c["strategy"].isin(top), c["strategy"], "Other"),
+                      when=pd.to_datetime(c["close_time"]).fillna(pd.Timestamp.now(tz=NY))).sort_values("when")
+        data = []
+        cols = [S1, S2, S3, S4, S5, S6]
+        for i, grp in enumerate(list(top) + (["Other"] if (cc["grp"] == "Other").any() else [])):
+            g = cc[cc["grp"] == grp]
+            data.append({"type": "scatter", "mode": "lines", "name": grp, "x": [_iso(v) for v in g["when"]],
+                         "y": g["pnl"].cumsum().round(2).tolist(), "line": {"color": cols[i], "width": 2, "shape": "hv"}})
+        parts.append(self.fig("f_stratcum", data, {"yaxis": {"tickprefix": "$"}}, 320,
+                              title="Cumulative P&L by strategy", wide=True))
+
+        def bucket_chart(fid, col, edges, labels, title, sub=""):
+            b = pd.cut(c[col], edges, labels=labels, right=True, include_lowest=True)
+            agg = c.groupby(b, observed=False)["pnl"].agg(["sum", "count", lambda s: (s > 0).mean()])
+            agg.columns = ["sum", "count", "wr"]
+            d = [{"type": "bar", "x": labels, "y": agg["sum"].round(2).tolist(),
+                  "marker": {"color": [_pn(v) for v in agg["sum"]]}, "showlegend": False,
+                  "text": [f"n={int(n)}" for n in agg["count"]], "textposition": "outside", "cliponaxis": False,
+                  "customdata": agg[["count", "wr"]].fillna(0).values.tolist(),
+                  "hovertemplate": "%{x}: %{y:$,.2f}<br>%{customdata[0]} trades · win rate %{customdata[1]:.0%}<extra></extra>"}]
+            return self.fig(fid, d, {"yaxis": {"tickprefix": "$"}, "bargap": 0.3}, 280, title=title, subtitle=sub)
+
+        parts.append(bucket_chart("f_dte", "dte", [-1, 0, 2, 7, 14, 30, 60, 10_000],
+                                  ["0DTE", "1–2", "3–7", "8–14", "15–30", "31–60", "60+"],
+                                  "P&L by days-to-expiration at entry"))
+        parts.append(bucket_chart("f_holdopt", "hold_days", [-1, 1 / 24, 1, 3, 7, 21, 10_000],
+                                  ["<1h", "1h–1d", "1–3d", "3–7d", "1–3w", "3w+"], "P&L by time in trade"))
+
+        side = c.assign(kind=np.where(c["rights"] == "C", "Calls", np.where(c["rights"] == "P", "Puts", "Calls + puts")))
+        g1 = side.groupby("kind")["pnl"].agg(["sum", "count"])
+        g2 = c.groupby("premium_side")["pnl"].agg(["sum", "count"])
+        data = [{"type": "bar", "x": g1.index.tolist(), "y": g1["sum"].round(2).tolist(),
+                 "marker": {"color": [_pn(v) for v in g1["sum"]]}, "name": "By right", "showlegend": False,
+                 "text": [f"n={n}" for n in g1["count"]], "textposition": "outside", "cliponaxis": False},
+                {"type": "bar", "x": [f"{k} trades" for k in g2.index], "y": g2["sum"].round(2).tolist(),
+                 "marker": {"color": [_pn(v) for v in g2["sum"]]}, "name": "By premium", "showlegend": False,
+                 "text": [f"n={n}" for n in g2["count"]], "textposition": "outside", "cliponaxis": False}]
+        parts.append(self.fig("f_cp", data, {"yaxis": {"tickprefix": "$"}, "bargap": 0.35}, 280,
+                              title="Calls vs. puts · debit vs. credit"))
+
+        oc = c.groupby("outcome")["pnl"].agg(["sum", "count"]).sort_values("count", ascending=False)
+        data = [{"type": "bar", "x": oc.index.tolist(), "y": oc["count"].tolist(), "marker": {"color": S1},
+                 "customdata": oc["sum"].round(2).tolist(), "showlegend": False,
+                 "hovertemplate": "%{x}: %{y} strategies<br>P&L %{customdata:$,.2f}<extra></extra>",
+                 "text": [money(v, True, 0) for v in oc["sum"]], "textposition": "outside", "cliponaxis": False}]
+        parts.append(self.fig("f_outcome", data, {"yaxis": {"title": {"text": "Strategies"}}, "bargap": 0.35}, 280,
+                              title="How positions ended", subtitle="Bar height = count; label = total P&L."))
+
+        ou = c.groupby("underlying")["pnl"].sum().sort_values()
+        data = [{"type": "bar", "orientation": "h", "y": ou.index.tolist(), "x": ou.round(2).tolist(),
+                 "marker": {"color": [_pn(v) for v in ou]}, "showlegend": False,
+                 "hovertemplate": "%{y}: %{x:$,.2f}<extra></extra>"}]
+        parts.append(self.fig("f_optund", data, {"xaxis": {"tickprefix": "$"}, "margin": {"l": 70}},
+                              max(260, 22 * len(ou) + 60), title="Options P&L by underlying"))
+
+        rr = done["ror"].dropna()
+        if len(rr) > 2:
+            data = [{"type": "histogram", "x": rr.clip(-1, 3).round(4).tolist(), "xbins": {"size": 0.25},
+                     "marker": {"color": S1, "line": {"color": "var:surface", "width": 2}}, "showlegend": False,
+                     "hovertemplate": "%{x}: %{y} trades<extra></extra>"}]
+            parts.append(self.fig("f_ror", data, {"xaxis": {"tickformat": "+.0%", "title": {"text": "P&L ÷ max risk"}},
+                                                  "yaxis": {"title": {"text": "Trades"}}}, 280,
+                                  title="Return on risk distribution",
+                                  subtitle="−100% = full loss of the premium or spread width at risk."))
+
+        if c["moneyness"].notna().sum() > 3:
+            m = c[c["moneyness"].notna()]
+            data = [{"type": "scatter", "mode": "markers", "x": m["moneyness"].round(4).tolist(), "y": m["pnl"].round(2).tolist(),
+                     "text": m["legs"].tolist(), "marker": {"color": [_pn(v) for v in m["pnl"]], "size": 9},
+                     "showlegend": False, "hovertemplate": "%{text}<br>moneyness %{x:+.1%}<br>%{y:$,.2f}<extra></extra>"}]
+            parts.append(self.fig("f_money", data, {"xaxis": {"tickformat": "+.0%", "title": {"text": "Moneyness at entry (+ = ITM)"}},
+                                                    "yaxis": {"tickprefix": "$"}}, 300, title="Single-leg P&L vs. moneyness at entry"))
+
+        # rolls
+        camp = c[c["campaign"].isin(c.loc[c["rolled_from"].notna(), "campaign"])]
+        if not camp.empty:
+            cg = camp.groupby("campaign").agg(Underlying=("underlying", "first"), Legs=("combo_id", "size"),
+                                              Start=("open_time", "min"), PnL=("pnl", "sum"),
+                                              Path=("legs", lambda s: "  →  ".join(s)))
+            cg["Start"] = cg["Start"].map(_iso)
+            cg = cg.rename(columns={"Legs": "Positions", "PnL": "Total P&L"})
+            parts.append('<figure class="card wide"><h3>Roll chains</h3><p class="sub">A position opened within the '
+                         'window of closing another on the same underlying is treated as a roll.</p>'
+                         + self.table(cg.reset_index(drop=True), {"Total P&L": lambda v: money(v, True)}, tid="t_rolls",
+                                      pnl_cols=("Total P&L",)) + '</figure>')
+
+        parts.append(self._open_options())
+
+        show = c[["open_time", "underlying", "strategy", "legs", "dte", "net_premium", "max_risk", "outcome",
+                  "hold_days", "pnl", "ror"]].sort_values("open_time", ascending=False).copy()
+        show["open_time"] = show["open_time"].map(_iso)
+        show.columns = ["Opened", "Underlying", "Strategy", "Legs", "DTE", "Net premium", "Max risk", "Outcome",
+                        "Days", "P&L", "Return on risk"]
+        parts.append('<figure class="card wide"><h3>All option strategies</h3><p class="sub">Net premium: + credit '
+                     'received / − debit paid, fees included. Open positions include unrealized P&L.</p>'
+                     + self.table(show, {"Net premium": lambda v: money(v, True), "Max risk": money,
+                                         "Days": lambda v: num(v, 1), "P&L": lambda v: money(v, True),
+                                         "Return on risk": lambda v: pct(v, True, 0)},
+                                  tid="t_strats", pnl_cols=("P&L", "Return on risk")) + '</figure>')
+        self.section("options", "Options", "".join(parts))
+
+    def _open_options(self) -> str:
+        a = self.a
+        op = a.open_positions
+        if op.empty or not (op["asset"] == "option").any():
+            return ""
+        today = (a.equity.index[-1] if a.equity is not None else date.today())
+        oo = op[(op["asset"] == "option") & (pd.to_datetime(op["expiry"]).dt.date >= today)]
+        out = []
+        greek_rows = []
+        for i, (und, g) in enumerate(oo.groupby("underlying")):
+            spot = _spot_from(a, und, g)
+            legs = []
+            for _, r in g.iterrows():
+                snap = a.bundle.option_snapshots.get(r["symbol"], {})
+                iv = snap.get("impliedVolatility")
+                legs.append({"symbol": r["symbol"], "qty": r["qty"], "cost": r["cost_basis"], "iv": iv})
+                gk = snap.get("greeks") or {}
+                if gk:
+                    greek_rows.append({"Underlying": und, "Contract": _leg(r["symbol"]), "Qty": r["qty"],
+                                       "IV": iv, "Δ shares": gk.get("delta", 0) * 100 * r["qty"],
+                                       "Γ": gk.get("gamma", 0) * 100 * r["qty"],
+                                       "Θ $/day": gk.get("theta", 0) * 100 * r["qty"],
+                                       "Vega $/vol-pt": gk.get("vega", 0) * 100 * r["qty"]})
+            sh = op[(op["asset"] == "stock") & (op["symbol"] == und)]
+            shares = float(sh["qty"].sum()) if len(sh) else 0.0
+            share_cost = float(sh["cost_basis"].sum()) if len(sh) else 0.0
+            if shares:
+                greek_rows.append({"Underlying": und, "Contract": "shares", "Qty": shares, "IV": None,
+                                   "Δ shares": shares, "Γ": 0.0, "Θ $/day": 0.0, "Vega $/vol-pt": 0.0})
+            if not spot:
+                continue
+            pc = payoff_curves(legs, spot, today, shares, share_cost)
+            exps = sorted({parse_occ(l["symbol"]).expiry for l in legs})
+            data = [{"type": "scatter", "mode": "lines", "name": "At expiration", "x": pc["x"], "y": pc["expiry"],
+                     "line": {"color": S1, "width": 2}},
+                    {"type": "scatter", "mode": "lines", "name": "Today (Black-Scholes, snapshot IV)", "x": pc["x"],
+                     "y": pc["today"], "line": {"color": S2, "width": 2, "dash": "dash"}}]
+            shapes = [{"type": "line", "x0": spot, "x1": spot, "yref": "paper", "y0": 0, "y1": 1,
+                       "line": {"color": "var:muted", "width": 1, "dash": "dot"}},
+                      {"type": "line", "xref": "paper", "x0": 0, "x1": 1, "y0": 0, "y1": 0,
+                       "line": {"color": "var:axis", "width": 1}}]
+            be = ", ".join(f"${b:,.2f}" for b in pc["breakevens"]) or "none in range"
+            stock_note = f" + {shares:g} shares" if shares else ""
+            out.append(self.fig(f"f_payoff_{i}", data, {"shapes": shapes, "xaxis": {"tickprefix": "$", "title": {"text": f"{und} price"}},
+                                                         "yaxis": {"tickprefix": "$"}, "hovermode": "x unified",
+                                                         "annotations": [{"x": spot, "yref": "paper", "y": 1, "text": f"spot ${spot:,.2f}",
+                                                                          "showarrow": False, "yanchor": "bottom",
+                                                                          "font": {"size": 11}}]}, 300,
+                                title=f"{und} open position payoff",
+                                subtitle=f"{len(legs)} option legs{stock_note} · expiries {', '.join(f'{d:%m/%d}' for d in exps)}"
+                                         f" · breakevens {be} · max gain {money(pc['max_profit'], True, 0)} · "
+                                         f"max loss {money(pc['max_loss'], True, 0)} in plotted range",
+                                note="Expiration curve values every leg at intrinsic value, which ignores remaining "
+                                     "time value on later-dated legs."))
+        html_g = ""
+        if greek_rows:
+            gdf = pd.DataFrame(greek_rows)
+            tot = gdf.groupby("Underlying")[["Δ shares", "Γ", "Θ $/day", "Vega $/vol-pt"]].sum().reset_index()
+            tot.insert(1, "Contract", "TOTAL")
+            gdf = pd.concat([gdf, tot.assign(Qty=math.nan, IV=None)], ignore_index=True).sort_values(
+                ["Underlying", "Contract"], key=lambda s: s.map(lambda v: (v == "TOTAL", v)))
+            html_g = ('<figure class="card wide"><h3>Open option Greeks</h3><p class="sub">Position Greeks from Alpaca '
+                      'snapshots. Δ in share-equivalents; Θ is dollars per day; vega is dollars per 1 vol point.</p>'
+                      + self.table(gdf, {"Qty": lambda v: "" if pd.isna(v) else f"{v:g}", "IV": lambda v: "" if v is None or pd.isna(v) else pct(v, dp=0),
+                                         "Δ shares": lambda v: num(v, 1), "Γ": lambda v: num(v, 2),
+                                         "Θ $/day": lambda v: money(v, True), "Vega $/vol-pt": lambda v: money(v, True)},
+                                   tid="t_greeks", pnl_cols=("Θ $/day",)) + '</figure>')
+        return "".join(out) + html_g
+
+    # ------------------------------------------------------------ positions
+    def _positions(self):
+        a = self.a
+        op = a.open_positions
+        if op.empty:
+            return
+        parts = []
+        p = op.dropna(subset=["unrealized_pl"]).sort_values("unrealized_pl")
+        data = [{"type": "bar", "orientation": "h", "y": p["symbol"].map(_leg).tolist(), "x": p["unrealized_pl"].round(2).tolist(),
+                 "marker": {"color": [_pn(v) for v in p["unrealized_pl"]]}, "showlegend": False,
+                 "customdata": np.c_[p["market_value"], p["unrealized_pct"].fillna(0)].round(4).tolist(),
+                 "hovertemplate": "%{y}<br>%{x:$,.2f} (%{customdata[1]:+.1%})<br>value %{customdata[0]:$,.2f}<extra></extra>"}]
+        parts.append(self.fig("f_unreal", data, {"xaxis": {"tickprefix": "$"}, "margin": {"l": 150}},
+                              max(300, 22 * len(p) + 60), title="Unrealized P&L by position",
+                              subtitle=f"Total {money(p['unrealized_pl'].sum(), True)} on cost basis "
+                                       f"{money(p['cost_basis'].sum())}; cost basis is fee-inclusive."))
+        stocks = op[(op["asset"] == "stock") & op["market_value"].notna()].sort_values("market_value", ascending=False)
+        if len(stocks):
+            tot = stocks["market_value"].sum()
+            data = [{"type": "bar", "x": stocks["symbol"].tolist(), "y": (stocks["market_value"] / tot).round(4).tolist(),
+                     "marker": {"color": S1}, "showlegend": False,
+                     "customdata": stocks["market_value"].round(2).tolist(),
+                     "hovertemplate": "%{x}: %{y:.1%} · %{customdata:$,.2f}<extra></extra>"}]
+            parts.append(self.fig("f_conc", data, {"yaxis": {"tickformat": ".0%"}, "bargap": 0.3}, 280,
+                                  title="Stock concentration (share of long stock value)",
+                                  subtitle=f"Top 3 = {pct((stocks['market_value'].head(3).sum()) / tot, dp=0)} of "
+                                           f"{money(tot, dp=0)}"))
+        show = op[["symbol", "asset", "qty", "avg_price", "broker_avg_price", "price", "market_value", "cost_basis",
+                   "unrealized_pl", "unrealized_pct"]].copy()
+        show.columns = ["Symbol", "Asset", "Qty", "Avg cost (eff.)", "Broker avg", "Price", "Value", "Cost basis",
+                        "Unrealized", "%"]
+        parts.append('<figure class="card wide"><h3>Open positions</h3><p class="sub">Avg cost = fee-inclusive cost '
+                     'basis ÷ quantity from the ledger; “Broker avg” is Alpaca’s figure for comparison.</p>'
+                     + self.table(show, {"Qty": lambda v: f"{v:g}", "Avg cost (eff.)": lambda v: num(v, 4),
+                                         "Broker avg": lambda v: num(v, 4), "Price": lambda v: num(v, 4),
+                                         "Value": money, "Cost basis": money, "Unrealized": lambda v: money(v, True),
+                                         "%": lambda v: pct(v, True)}, tid="t_pos", pnl_cols=("Unrealized", "%"))
+                     + '</figure>')
+        self.section("positions", "Positions", "".join(parts))
+
+    # ---------------------------------------------------------------- notes
+    def _notes(self):
+        a = self.a
+        items = []
+        rec = a.reconciliation
+        if rec is not None:
+            items.append("<li><b>Ledger vs. broker positions:</b> "
+                         + ("every open quantity matches Alpaca exactly." if rec.empty else
+                            f"{len(rec)} mismatches – history may be incomplete:" + self.table(rec, tid="t_rec"))
+                         + "</li>")
+        cs = a.cash_summary
+        items.append(f"<li><b>Fees:</b> {money(cs.get('fees', 0))} total; {money(cs.get('fees_in_trades', 0))} folded "
+                     "into fill prices (order-linked fees to their order, daily regulatory fees to that day's fills: "
+                     "TAF/REG→sells, ORF/OCC→option contracts, CAT→all executions).</li>")
+        items.append("<li><b>Assignments & exercises</b> close the option at $0 and deliver stock at the strike, as "
+                      "Alpaca books them: the option premium stays on the option, the stock P&L starts at the strike.</li>")
+        items.append("<li><b>Returns</b> are time-weighted (Modified Dietz, flows at start of day) so deposits never "
+                     "count as performance. Benchmarks are run with the same deposits on the same days.</li>")
+        if a.start:
+            early = a.ledger.closed_df()
+            early = early[early["close_time"].dt.date < a.start] if not early.empty else early
+            if len(early):
+                items.append(f"<li><b>Window:</b> analysis starts {a.start:%b %d, %Y}. {len(early)} earlier closed "
+                             f"lots ({money(early['pnl'].sum(), True)}) are excluded; pass <code>--start</code> "
+                             "to change the window.</li>")
+        for w in a.warnings:
+            items.append(f"<li>{html.escape(w)}</li>")
+        self.section("notes", "Method & data checks", f'<div class="card wide prose"><ul>{"".join(items)}</ul></div>')
+
+
+# --------------------------------------------------------------------- helpers
+def _clean(o):
+    """Recursively replace NaN/inf with None so the figure JSON is always valid."""
+    if isinstance(o, dict):
+        return {k: _clean(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_clean(v) for v in o]
+    if isinstance(o, (float, np.floating)):
+        return None if math.isnan(o) or math.isinf(o) else float(o)
+    return o
+
+
+def _json_default(o):
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return None if math.isnan(o) or math.isinf(o) else float(o)
+    if isinstance(o, (date, datetime, pd.Timestamp)):
+        return _iso(o)
+    raise TypeError(type(o))
+
+
+def _profit_factor(t: pd.DataFrame) -> float:
+    if t.empty:
+        return math.nan
+    loss = -t.loc[t["pnl"] < 0, "pnl"].sum()
+    return t.loc[t["pnl"] > 0, "pnl"].sum() / loss if loss > 0 else math.inf
+
+
+def _streaks(pnl: pd.Series) -> tuple[int, int]:
+    best_w = best_l = cw = cl = 0
+    for v in pnl:
+        if v > 0:
+            cw, cl = cw + 1, 0
+        elif v < 0:
+            cl, cw = cl + 1, 0
+        best_w, best_l = max(best_w, cw), max(best_l, cl)
+    return best_w, best_l
+
+
+def _dur(days: float) -> str:
+    if days is None or (isinstance(days, float) and math.isnan(days)):
+        return "–"
+    if days < 1 / 24:
+        return f"{days * 1440:.0f} min"
+    if days < 1:
+        return f"{days * 24:.1f} h"
+    return f"{days:.1f} d"
+
+
+def _nice_bins(s: pd.Series, target: int = 24):
+    lo, hi = float(s.min()), float(s.max())
+    span = max(hi - lo, 1.0)
+    raw = span / target
+    mag = 10 ** math.floor(math.log10(raw))
+    step = min((m * mag for m in (1, 2, 2.5, 5, 10) if m * mag >= raw), default=raw)
+    start = math.floor(lo / step) * step
+    edges = np.arange(start, hi + step, step)
+    # keep zero on an edge so wins and losses never share a bar
+    return edges if len(edges) > 1 else np.array([lo - 1, hi + 1])
+
+
+def _leg(sym: str) -> str:
+    c = parse_occ(sym)
+    return f"{c.underlying} {c.expiry:%m/%d} {c.strike:g}{c.right}" if c else sym
+
+
+def _spot_from(a: Analysis, und: str, g: pd.DataFrame) -> float | None:
+    op = a.open_positions
+    s = op[(op["symbol"] == und) & op["price"].notna()]
+    if len(s):
+        return float(s["price"].iloc[0])
+    if und in a.bundle.prices:
+        return float(a.bundle.prices[und])
+    bars = a.bundle.bars.get(und)
+    if bars:
+        return float(bars[-1]["c"])
+    return None
+
+
+def render(a: Analysis, path: str | Path, inline_js: str | None = None) -> Path:
+    return Report(a).render(path, inline_js)

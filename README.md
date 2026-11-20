@@ -1,0 +1,107 @@
+# alpaca-trade-history
+
+Portfolio and trade analytics for an **Alpaca** brokerage account. It pulls your full activity history
+(read-only), rebuilds every position with FIFO lot matching, groups option legs into strategies, and
+writes one self-contained, interactive HTML report.
+
+## What's in the report
+
+| Tab | Contents |
+|---|---|
+| **Overview** | Equity vs. net deposits vs. SPY/QQQ bought with the *same deposits on the same days* · KPI tiles · P&L attribution waterfall (stocks, options, unrealized, dividends, interest) reconciled to the account's P&L |
+| **Performance** | Time-weighted return vs. benchmarks · cumulative $ P&L vs. buy & hold · daily P&L · monthly returns · daily-return scatter with β/α, correlation, up/down capture · rolling 21-day volatility, Sharpe and beta · risk/return table (Sharpe, Sortino, Calmar, max DD) |
+| **Drawdown** | Underwater curve vs. benchmarks · dollar drawdown · worst drawdown episodes |
+| **Trades** | Cumulative realized P&L (stocks/options) · P&L distribution · holding period vs. P&L · P&L by underlying · **your trading vs. just holding the underlying** · P&L by entry weekday and hour · trade timeline · sortable table of every closed lot |
+| **Options** | P&L and win rate by strategy · cumulative P&L by strategy · P&L by DTE at entry and by time in trade · calls vs. puts, debit vs. credit · how positions ended (closed, expired, assigned, exercised) · P&L by underlying · return-on-risk distribution · moneyness at entry · **roll chains** · **payoff diagrams for open positions** (at expiration + today via Black-Scholes at snapshot IV, including shares held) · position Greeks · strategy table |
+| **Positions** | Unrealized P&L by position · concentration · holdings table |
+| **Method & data checks** | Ledger vs. broker position reconciliation, fee treatment, warnings |
+
+Strategies detected: long/short calls and puts, covered calls (shares held at entry), cash-secured/short
+puts, bull/bear call and put verticals, calendars, diagonals, straddles, strangles, risk reversals,
+butterflies, iron condors/butterflies, reverse condors, double verticals, ratio spreads, and a
+"custom N-leg" fallback.
+
+## Quick start
+
+```bash
+pip install -e .
+```
+
+```bash
+export APCA_API_KEY_ID=...        # a live-account key; only GET endpoints are called
+export APCA_API_SECRET_KEY=...
+```
+
+```bash
+alpaca-analyzer run --out reports/report.html
+```
+
+Open `reports/report.html` in a browser. `run` = `fetch` (download into `data/live/`) + `report`; you
+can run them separately to re-render without hitting the API:
+
+```bash
+alpaca-analyzer fetch --out data/live
+```
+
+```bash
+alpaca-analyzer report --data data/live --out reports/report.html --benchmarks SPY QQQ IWM
+```
+
+Useful options:
+
+| Flag | Meaning |
+|---|---|
+| `--paper` | use the paper-trading endpoint |
+| `--feed iex` | market-data feed if your plan has no SIP access |
+| `--start YYYY-MM-DD` | analysis window start (default: start of the funded equity history) |
+| `--combo-window 120` | seconds within which legs on one underlying form one strategy |
+| `--rf 0.04` | risk-free rate for Sharpe/Sortino |
+| `--offline` | embed plotly.js (≈4.5 MB) so the file opens without internet |
+
+`data/` and `reports/` are git-ignored: your account data stays local.
+
+## How the numbers are computed
+
+* **Effective prices (cost ÷ quantity, fees included).** Every fee is folded into the fill it belongs
+  to before lots are matched. Fees carrying an `order_id` (OCC clearing) go to that order's fills;
+  daily regulatory fees go to that trade date's fills: TAF/REG to sells, ORF/OCC per option contract,
+  CAT to every execution. Entry/exit prices, realized P&L, and open cost basis are all net of fees. The
+  broker's gross price and average cost are kept for comparison.
+* **FIFO lots** per symbol, long and short, with options at a ×100 multiplier.
+* **Expirations / assignments / exercises** close the option at $0; the delivered stock (`OPTRD`) is
+  booked at the strike, matching how Alpaca records it.
+* **Splits** rescale open lots preserving basis; **spin-offs** are booked at Alpaca's reference price
+  (flagged in the notes).
+* **Returns** are time-weighted (Modified Dietz, daily, flows at the start of the day), so deposits never
+  count as performance. Benchmarks are simulated with your exact deposits.
+* **Buy & hold per symbol**: your peak capital committed to that name, invested in the underlying on
+  your first trade date and held to today.
+* **Reconciliation**: the ledger's open quantities are compared to Alpaca's positions; any mismatch
+  (e.g. history that starts mid-position) is listed on the notes tab.
+
+## Bundle format (offline / CSV import)
+
+A bundle directory holds `activities.json` (raw Alpaca activities) and/or `activities.csv`,
+`portfolio_history.json`, `positions.json`, `account.json`, `bars.json` (`{symbol: [{t, c}]}`),
+and optionally `prices.json` and `option_snapshots.json`. The CSV form is handy for hand-built or
+exported histories:
+
+```csv
+activity_type,time,symbol,side,qty,price,net_amount,sub_type,order_id
+FILL,2026-08-05T13:39:23Z,INTC260821C00102000,buy,2,6,,,
+CSD,2026-08-21,,,,,1000,,
+OPEXP,2026-08-21,PLTR260821C00185000,,-1,,0,,
+FEE,2026-08-05,,,,,-0.05,OCC,<order id>
+```
+
+If no FEE rows are present, daily fee totals from `portfolio_history.json` are allocated instead.
+
+## Development
+
+```bash
+pip install -e '.[test]'
+```
+
+```bash
+pytest -q
+```

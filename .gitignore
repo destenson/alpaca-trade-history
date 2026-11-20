@@ -1,0 +1,10 @@
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+# Your account data and generated reports stay local by default.
+data/
+reports/
+*.html
+!alpaca_analyzer/templates/*.html
+.env

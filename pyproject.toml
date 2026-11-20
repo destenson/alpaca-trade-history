@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alpaca-analyzer"
+version = "0.1.0"
+description = "Portfolio & trade analytics for Alpaca accounts: P&L, drawdown, benchmarks, and options-strategy analysis rendered to a self-contained HTML report."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["pandas>=2.0", "numpy>=1.24", "requests>=2.28"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+alpaca-analyzer = "alpaca_analyzer.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["alpaca_analyzer*"]
+
+[tool.setuptools.package-data]
+alpaca_analyzer = ["templates/*"]
