@@ -9,6 +9,9 @@
 <meta name="referrer" content="no-referrer">
 <title>Alpaca Trade Analyzer</title>
 <link rel="stylesheet" href="style.css">
+<script>/* apply a saved theme before first paint */
+try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 </head>
 <body>
 <header class="top">
@@ -17,7 +20,10 @@
     <p class="lede">P&amp;L, drawdown, benchmark and options-strategy analytics for your Alpaca account. Runs entirely in your
       browser: your keys go only to Alpaca's API, and the analysis runs locally in Python (WebAssembly).</p>
   </div>
-  <a class="src" href="https://github.com/destenson/alpaca-trade-history" rel="noopener">Source on GitHub</a>
+  <div class="tools">
+    <a class="src" href="https://github.com/destenson/alpaca-trade-history" rel="noopener">Source on GitHub</a>
+    <button type="button" id="themeBtn" class="ghost" aria-label="Toggle color theme">Theme</button>
+  </div>
 </header>
 
 <main>

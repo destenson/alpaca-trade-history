@@ -322,6 +322,33 @@ const fmtMoney = (v, signed) => (v < 0 ? '−' : signed && v > 0 ? '+' : '') + '
   Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
 const fmtPct = (v) => (v < 0 ? '−' : '+') + Math.abs(v * 100).toFixed(1) + '%';
 
+// ------------------------------------------------------------------------------- theme
+// The page owns the theme and pushes it into the report frame; the report's own Theme button asks the
+// page to switch. Messages carry only a theme name and are accepted only from our own frame.
+const THEME_KEY = 'alpaca-analyzer.theme';
+const darkMQ = matchMedia('(prefers-color-scheme: dark)');
+const effectiveTheme = () => document.documentElement.dataset.theme || (darkMQ.matches ? 'dark' : 'light');
+
+function syncFrameTheme() {
+  const w = $('frame').contentWindow;
+  if (w) w.postMessage({ type: 'aa-set-theme', theme: effectiveTheme() }, '*');
+}
+
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem(THEME_KEY, t); } catch (e) { /* storage unavailable */ }
+  syncFrameTheme();
+}
+
+$('themeBtn').addEventListener('click', () => setTheme(effectiveTheme() === 'dark' ? 'light' : 'dark'));
+darkMQ.addEventListener('change', syncFrameTheme);
+$('frame').addEventListener('load', syncFrameTheme);
+window.addEventListener('message', (e) => {
+  if (e.source !== $('frame').contentWindow || !e.data || typeof e.data !== 'object') return;
+  if (e.data.type === 'aa-ready') syncFrameTheme();
+  if (e.data.type === 'aa-theme' && (e.data.theme === 'light' || e.data.theme === 'dark')) setTheme(e.data.theme);
+});
+
 // ------------------------------------------------------------------------------ wiring
 $('origin').textContent = location.origin;
 $('remember').addEventListener('change', (e) => { $('passrow').hidden = !e.target.checked; });

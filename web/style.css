@@ -4,13 +4,20 @@
   --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10); --accent: #2a78d6; --accent-ink: #fff;
   --ok: #006300; --err: #b8302f;
 }
+/* OS dark mode, unless the viewer picked light; an explicit pick (data-theme) always wins */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     color-scheme: dark;
     --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
     --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --accent: #3987e5;
     --ok: #0ca30c; --err: #ee8a8a;
   }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --accent: #3987e5;
+  --ok: #0ca30c; --err: #ee8a8a;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--page); color: var(--ink);
@@ -20,7 +27,9 @@ a { color: var(--accent); }
   justify-content: space-between; align-items: flex-start; flex-wrap: wrap; }
 .top h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
 .lede { margin: 6px 0 0; color: var(--ink-2); max-width: 680px; }
-.src { white-space: nowrap; margin-top: 4px; }
+.tools { display: flex; gap: 12px; align-items: center; margin-top: 2px; }
+.src { white-space: nowrap; }
+#themeBtn { padding: 4px 10px; font-size: 12px; color: var(--ink-2); }
 main { max-width: 1100px; margin: 0 auto; padding: 8px 24px 40px; }
 #result { max-width: none; }
 .card { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; padding: 18px 20px;
@@ -59,7 +68,7 @@ code { font-size: 12px; }
   align-items: center; flex-wrap: wrap; }
 .summary { color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .summary b { color: var(--ink); }
-#frame { display: block; width: 100%; height: calc(100vh - 120px); min-height: 640px; border: 1px solid var(--ring);
+#frame { color-scheme: inherit; display: block; width: 100%; height: calc(100vh - 120px); min-height: 640px; border: 1px solid var(--ring);
   border-radius: 12px; background: var(--page); }
 @media (max-width: 640px) {
   .top, main { padding-left: 16px; padding-right: 16px; }
