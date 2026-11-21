@@ -26,6 +26,10 @@ jobs:
         run: |
           pip install -e '.[test]'
           pytest -q
+      - name: Configure Pages (source must be "GitHub Actions")
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - name: Build site
         run: |
           python scripts/build_site.py site
