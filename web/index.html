@@ -54,7 +54,12 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
           placeholder="Encrypts the saved keys"></label>
         <p class="hint">Saved keys live in this browser's <code>localStorage</code> for
           <b id="origin"></b>, which every page on that origin can read. With a passphrase they're stored
-          AES-GCM encrypted and you'll enter the passphrase on each visit.</p>
+          AES-GCM encrypted.</p>
+      </div>
+      <div class="row" id="keeprow" hidden>
+        <label class="check"><input type="checkbox" id="keep" checked> Keep unlocked on this device for 30 days</label>
+        <span class="hint">Opens straight into your report without the passphrase; any visit restarts the 30 days.
+          Use <b>Lock</b> to end it.</span>
       </div>
       <div class="row actions">
         <button type="submit" id="run" class="primary">Analyze my account</button>
@@ -70,6 +75,7 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
   <section class="card" id="unlock" hidden>
     <form id="unlockForm" autocomplete="off" class="row actions">
       <label class="grow">Passphrase for saved keys<input id="unlockPass" type="password" autocomplete="current-password"></label>
+      <label class="check"><input type="checkbox" id="unlockKeep" checked> Keep unlocked on this device for 30 days</label>
       <button type="submit" class="primary">Unlock &amp; analyze</button>
       <button type="button" id="unlockForget" class="ghost">Forget saved keys</button>
     </form>
@@ -95,6 +101,7 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
         <button type="button" id="refresh" class="primary" title="Re-download your account data with the keys from this session">Refresh</button>
         <button type="button" id="dlFull" class="ghost">Download full</button>
         <button type="button" id="dlShare" class="ghost">Download shareable</button>
+        <button type="button" id="lock" class="ghost" hidden title="Require the passphrase again on this device">Lock</button>
         <button type="button" id="again" class="ghost">Start over</button>
       </div>
     </div>

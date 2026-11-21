@@ -85,10 +85,14 @@ browser: it calls Alpaca's API directly (GET requests only; Alpaca allows browse
 this Python package via [Pyodide](https://pyodide.org) (WebAssembly). Nothing is sent to any other server.
 The first visit downloads ~20 MB of Python/pandas, which the browser then caches.
 
-* **Keys**: held in memory by default. "Remember keys on this device" stores them in `localStorage`.
-  Add a passphrase and they're stored AES-GCM-encrypted (PBKDF2-SHA256 key derivation), and the
-  passphrase is asked for on each visit. Without one they're stored in plain text, readable by any page
-  on the same origin (all of a user's `*.github.io` project sites share one).
+* **Keys**: held in memory by default (**Refresh** re-runs with them, no re-entry). "Remember keys on this
+  device" stores them in `localStorage`; add a passphrase and they're stored AES-GCM-encrypted
+  (PBKDF2-SHA256). Without one they're plain text, readable by any page on the same origin (all of a
+  user's `*.github.io` project sites share one).
+* **Keep unlocked (30 days)**: after one passphrase entry, the keys are also encrypted under a random,
+  **non-extractable** WebCrypto key kept in IndexedDB, so the page opens straight into the report. The
+  window slides with each visit; **Lock** or "Forget saved keys" ends it. While unlocked, same-origin
+  scripts could ask the browser to decrypt, but the key bytes can't be read or copied out of the profile.
 * **Isolation**: a Content-Security-Policy limits network access to Alpaca's hosts and the pinned CDN
   (scripts carry SRI hashes). The report renders in a sandboxed iframe with no access to the page's
   storage. Both the full and the shareable (`--share`) report can be downloaded.

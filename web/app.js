@@ -44,9 +44,69 @@ async function decryptRecord(rec, pass) {
   return JSON.parse(new TextDecoder().decode(pt));
 }
 
-function forget() {
+async function forget() {
   try { localStorage.removeItem(STORE_KEY); } catch (e) { /* storage unavailable */ }
+  await lockDevice();
   location.reload();
+}
+
+// ------------------------------------------------- "keep unlocked on this device"
+// After a passphrase unlock, the credentials are also encrypted under a random AES key that the browser
+// generates as NON-EXTRACTABLE and keeps in IndexedDB. Scripts on this origin can ask the browser to
+// decrypt with it, but nothing can read the key's bytes, so the stored data is useless if copied out of
+// the browser profile. The unlock expires after 30 days without a visit, and Lock / Forget delete it.
+const IDB_NAME = 'alpaca-analyzer';
+const IDB_STORE = 'device';
+const UNLOCK_ID = 'unlock';
+const UNLOCK_DAYS = 30;
+
+function idb() {
+  return new Promise((resolve, reject) => {
+    const r = indexedDB.open(IDB_NAME, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore(IDB_STORE);
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+async function idbDo(mode, fn) {
+  const db = await idb();
+  return new Promise((resolve, reject) => {
+    const req = fn(db.transaction(IDB_STORE, mode).objectStore(IDB_STORE));
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function keepUnlocked(creds) {
+  try {
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(creds)));
+    await idbDo('readwrite', (st) => st.put({ key, iv, ct, expires: Date.now() + UNLOCK_DAYS * 864e5 }, UNLOCK_ID));
+    return true;
+  } catch (e) {
+    console.warn('Could not keep the device unlocked:', e);
+    return false;
+  }
+}
+
+async function deviceUnlock() {
+  try {
+    const rec = await idbDo('readonly', (st) => st.get(UNLOCK_ID));
+    if (!rec) return null;
+    if (!(rec.expires > Date.now())) { await lockDevice(); return null; }
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: rec.iv }, rec.key, rec.ct);
+    rec.expires = Date.now() + UNLOCK_DAYS * 864e5;          // sliding window
+    await idbDo('readwrite', (st) => st.put(rec, UNLOCK_ID));
+    return JSON.parse(new TextDecoder().decode(pt));
+  } catch (e) {
+    await lockDevice();
+    return null;
+  }
+}
+
+async function lockDevice() {
+  try { await idbDo('readwrite', (st) => st.delete(UNLOCK_ID)); } catch (e) { /* IndexedDB unavailable */ }
 }
 
 // ------------------------------------------------------------------------ progress UI
@@ -401,15 +461,22 @@ window.addEventListener('message', (e) => {
 
 // ------------------------------------------------------------------------------ wiring
 $('origin').textContent = location.origin;
-$('remember').addEventListener('change', (e) => { $('passrow').hidden = !e.target.checked; });
+$('remember').addEventListener('change', (e) => {
+  $('passrow').hidden = !e.target.checked;
+  $('keeprow').hidden = !e.target.checked || !$('pass').value;
+});
+$('pass').addEventListener('input', () => { $('keeprow').hidden = !$('remember').checked || !$('pass').value; });
 
 $('form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const creds = { key: $('key').value.trim(), secret: $('secret').value.trim(),
     env: document.querySelector('input[name=env]:checked').value };
+  const pass = $('pass').value;
+  await lockDevice();                       // new keys replace any previous unlock
   if ($('remember').checked) {
-    const ok = await saveCreds(creds, $('pass').value);
+    const ok = await saveCreds(creds, pass);
     if (!ok) alert('This browser blocked local storage, so the keys were not saved.');
+    if (ok && pass && $('keep').checked && await keepUnlocked(creds)) $('lock').hidden = false;
   } else {
     try { localStorage.removeItem(STORE_KEY); } catch (_) { /* storage unavailable */ }
   }
@@ -422,6 +489,7 @@ $('unlockForm').addEventListener('submit', async (e) => {
   try {
     const creds = await decryptRecord(loadRecord(), $('unlockPass').value);
     $('unlockPass').value = '';
+    if ($('unlockKeep').checked && await keepUnlocked(creds)) $('lock').hidden = false;
     run(creds);
   } catch (err) {
     $('unlockErr').textContent = 'Wrong passphrase.';
@@ -437,13 +505,27 @@ $('dlFull').addEventListener('click', () => download('full'));
 $('dlShare').addEventListener('click', () => download('share'));
 $('again').addEventListener('click', () => location.reload());
 $('refresh').addEventListener('click', refresh);
+$('lock').addEventListener('click', async () => {
+  await lockDevice();
+  $('lock').hidden = true;
+  $('refreshStatus').classList.remove('err');
+  $('refreshStatus').textContent = '· Locked: the passphrase will be needed next time.';
+});
 
-// Saved keys: plain ones prefill the form; encrypted ones ask for the passphrase first.
+// Saved keys: plain ones prefill the form; encrypted ones open straight into the report while the
+// device is kept unlocked, and otherwise ask for the passphrase.
 const rec = loadRecord();
 if (rec && rec.enc) {
   $('login').hidden = true;
-  $('unlock').hidden = false;
-  $('unlockPass').focus();
+  deviceUnlock().then((creds) => {
+    if (creds) {
+      $('lock').hidden = false;
+      run(creds);
+    } else {
+      $('unlock').hidden = false;
+      $('unlockPass').focus();
+    }
+  });
 } else if (rec) {
   $('key').value = rec.key || '';
   $('secret').value = rec.secret || '';

@@ -20,6 +20,7 @@
   --ok: #0ca30c; --err: #ee8a8a;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }   /* author display rules must not un-hide elements */
 html, body { margin: 0; background: var(--page); color: var(--ink);
   font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 a { color: var(--accent); }
