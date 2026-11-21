@@ -76,3 +76,5 @@ code { font-size: 12px; }
 }
 /* the report is laid out for ~1360px; give it room once it's showing */
 main:has(#result:not([hidden])) { max-width: 1440px; }
+#refreshStatus.err { color: var(--err); }
+#refresh:disabled { opacity: 0.7; cursor: progress; }

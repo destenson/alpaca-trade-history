@@ -83,12 +83,16 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
 
   <section id="result" hidden>
     <div class="bar">
-      <div id="summary" class="summary"></div>
+      <div>
+        <div id="summary" class="summary"></div>
+        <div class="muted"><span id="updated"></span> <span id="refreshStatus" role="status" aria-live="polite"></span></div>
+      </div>
       <div class="actions">
         <div class="seg" role="tablist">
           <button type="button" id="viewFull" class="on">Full report</button>
           <button type="button" id="viewShare">Shareable view</button>
         </div>
+        <button type="button" id="refresh" class="primary" title="Re-download your account data with the keys from this session">Refresh</button>
         <button type="button" id="dlFull" class="ghost">Download full</button>
         <button type="button" id="dlShare" class="ghost">Download shareable</button>
         <button type="button" id="again" class="ghost">Start over</button>

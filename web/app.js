@@ -51,14 +51,20 @@ function forget() {
 
 // ------------------------------------------------------------------------ progress UI
 let currentStep = null;
+let stepSink = null;      // during a refresh, progress goes to the inline status instead of the step list
+let sinkText = '';
 function step(text) {
+  if (stepSink) { sinkText = text; stepSink(text); return; }
   if (currentStep) { currentStep.classList.remove('active'); currentStep.classList.add('done'); }
   currentStep = document.createElement('li');
   currentStep.textContent = text;
   currentStep.className = 'active';
   $('steps').appendChild(currentStep);
 }
-function note(text) { if (currentStep) currentStep.textContent += ' ' + text; }
+function note(text) {
+  if (stepSink) { stepSink(`${sinkText} ${text}`); return; }
+  if (currentStep) currentStep.textContent += ' ' + text;
+}
 
 // ----------------------------------------------------------------------- Alpaca client
 class Alpaca {
@@ -264,31 +270,46 @@ function loadPython() {
 // ------------------------------------------------------------------------------- run
 let reports = null;
 
+let lastCreds = null;     // kept in memory for this tab only, so Refresh needs no re-entry
+let currentView = 'full';
+let currentTab = null;    // report tab the viewer is on (reported by the frame)
+let refreshing = false;
+
+async function analyze(creds) {
+  const benchmarks = ($('bench').value || 'SPY QQQ').toUpperCase().split(/[\s,]+/).filter(Boolean);
+  const pyLoading = loadPython();   // download Python in parallel with the API calls
+  const bundle = await fetchBundle(creds, benchmarks);
+  step('Starting the analysis engine (first visit downloads ~20 MB, then it\'s cached)…');
+  const py = await pyLoading;
+  step(`Rebuilding ${bundle.activities.length} activities into lots, strategies and charts…`);
+  await new Promise((r) => setTimeout(r, 30));  // let the progress text paint
+  const opts = { benchmarks, start: $('start').value || null };
+  return JSON.parse(py.globals.get('build_reports')(JSON.stringify(bundle), JSON.stringify(opts)));
+}
+
+function applyResult(out) {
+  reports = out;
+  show(currentView);
+  const s = out.summary;
+  $('summary').innerHTML = s
+    ? `<b>${fmtMoney(s.equity)}</b> equity · P&amp;L <b>${fmtMoney(s.pnl, true)}</b> · time-weighted <b>${fmtPct(s.twr)}</b> · max drawdown <b>${fmtPct(s.max_dd)}</b>`
+    : 'Report ready.';
+  $('updated').textContent = 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
 async function run(creds) {
+  lastCreds = creds;
   $('login').hidden = true;
   $('unlock').hidden = true;
   $('progress').hidden = false;
   $('error').hidden = true;
   $('steps').innerHTML = '';
   currentStep = null;
-  const benchmarks = ($('bench').value || 'SPY QQQ').toUpperCase().split(/[\s,]+/).filter(Boolean);
   try {
-    const pyLoading = loadPython();   // download Python in parallel with the API calls
-    const bundle = await fetchBundle(creds, benchmarks);
-    step('Starting the analysis engine (first visit downloads ~20 MB, then it\'s cached)…');
-    const py = await pyLoading;
-    step(`Rebuilding ${bundle.activities.length} activities into lots, strategies and charts…`);
-    await new Promise((r) => setTimeout(r, 30));  // let the progress text paint
-    const opts = { benchmarks, start: $('start').value || null };
-    const out = JSON.parse(py.globals.get('build_reports')(JSON.stringify(bundle), JSON.stringify(opts)));
+    const out = await analyze(creds);
     step('Done.');
     currentStep.classList.replace('active', 'done');
-    reports = out;
-    show('full');
-    const s = out.summary;
-    $('summary').innerHTML = s
-      ? `<b>${fmtMoney(s.equity)}</b> equity · P&amp;L <b>${fmtMoney(s.pnl, true)}</b> · time-weighted <b>${fmtPct(s.twr)}</b> · max drawdown <b>${fmtPct(s.max_dd)}</b>`
-      : 'Report ready.';
+    applyResult(out);
     $('progress').hidden = true;
     $('result').hidden = false;
   } catch (e) {
@@ -303,7 +324,32 @@ async function run(creds) {
   }
 }
 
+// Re-fetch and re-analyze with the in-memory keys; the current report stays up until the new one is ready.
+async function refresh() {
+  if (!lastCreds || refreshing) return;
+  refreshing = true;
+  const btn = $('refresh');
+  btn.disabled = true;
+  btn.textContent = 'Refreshing…';
+  $('refreshStatus').classList.remove('err');
+  stepSink = (t) => { $('refreshStatus').textContent = '· ' + t; };
+  try {
+    applyResult(await analyze(lastCreds));
+    $('refreshStatus').textContent = '';
+  } catch (e) {
+    console.error(e);
+    $('refreshStatus').textContent = '· Refresh failed: ' + (e.message || String(e)) + ' Showing the previous report.';
+    $('refreshStatus').classList.add('err');
+  } finally {
+    stepSink = null;
+    refreshing = false;
+    btn.disabled = false;
+    btn.textContent = 'Refresh';
+  }
+}
+
 function show(which) {
+  currentView = which;
   $('frame').srcdoc = reports[which];
   $('viewFull').classList.toggle('on', which === 'full');
   $('viewShare').classList.toggle('on', which === 'share');
@@ -345,7 +391,11 @@ darkMQ.addEventListener('change', syncFrameTheme);
 $('frame').addEventListener('load', syncFrameTheme);
 window.addEventListener('message', (e) => {
   if (e.source !== $('frame').contentWindow || !e.data || typeof e.data !== 'object') return;
-  if (e.data.type === 'aa-ready') syncFrameTheme();
+  if (e.data.type === 'aa-ready') {
+    syncFrameTheme();
+    if (currentTab) $('frame').contentWindow.postMessage({ type: 'aa-set-tab', tab: currentTab }, '*');
+  }
+  if (e.data.type === 'aa-tab' && typeof e.data.tab === 'string' && /^[a-z]{1,30}$/.test(e.data.tab)) currentTab = e.data.tab;
   if (e.data.type === 'aa-theme' && (e.data.theme === 'light' || e.data.theme === 'dark')) setTheme(e.data.theme);
 });
 
@@ -386,6 +436,7 @@ $('viewShare').addEventListener('click', () => show('share'));
 $('dlFull').addEventListener('click', () => download('full'));
 $('dlShare').addEventListener('click', () => download('share'));
 $('again').addEventListener('click', () => location.reload());
+$('refresh').addEventListener('click', refresh);
 
 // Saved keys: plain ones prefill the form; encrypted ones ask for the passphrase first.
 const rec = loadRecord();

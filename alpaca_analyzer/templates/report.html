@@ -144,6 +144,7 @@ function show(id) {
   secs.forEach(s => s.classList.toggle('on', s.id === id));
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.dataset.tab === id));
   try { localStorage.setItem('aa-tab', id); } catch (e) {}
+  if (window.parent !== window) parent.postMessage({ type: 'aa-tab', tab: id }, '*');
   requestAnimationFrame(drawVisible);
 }
 document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', e => {
@@ -166,7 +167,9 @@ document.getElementById('theme').addEventListener('click', () => {
   setTheme(dark ? 'light' : 'dark', true);
 });
 window.addEventListener('message', (e) => {
-  if (EMBEDDED && e.source === window.parent && e.data && e.data.type === 'aa-set-theme') setTheme(e.data.theme, false);
+  if (!EMBEDDED || e.source !== window.parent || !e.data) return;
+  if (e.data.type === 'aa-set-theme') setTheme(e.data.theme, false);
+  if (e.data.type === 'aa-set-tab' && typeof e.data.tab === 'string') show(e.data.tab);
 });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { drawn.clear(); drawVisible(); });
 // alternative readings of open positions: one view visible at a time
