@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Keys may only ever be sent to Alpaca: connect-src is limited to Alpaca hosts plus the CDN that
+     serves Python/pandas. The report renders in a sandboxed frame with no access to this page's storage. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' https://cdn.jsdelivr.net https://api.alpaca.markets https://paper-api.alpaca.markets https://data.alpaca.markets; img-src 'self' data: blob:; frame-src 'self' blob:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>Alpaca Trade Analyzer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1>Alpaca Trade Analyzer</h1>
+    <p class="lede">P&amp;L, drawdown, benchmark and options-strategy analytics for your Alpaca account. Runs entirely in your
+      browser: your keys go only to Alpaca's API, and the analysis runs locally in Python (WebAssembly).</p>
+  </div>
+  <a class="src" href="https://github.com/destenson/alpaca-trade-history" rel="noopener">Source on GitHub</a>
+</header>
+
+<main>
+  <section class="card" id="login">
+    <form id="form" autocomplete="off">
+      <div class="row two">
+        <label>API key ID<input id="key" name="key" spellcheck="false" autocapitalize="off" required></label>
+        <label>Secret key<input id="secret" name="secret" type="password" spellcheck="false" autocapitalize="off" required></label>
+      </div>
+      <div class="row">
+        <fieldset class="seg" aria-label="Account">
+          <label><input type="radio" name="env" value="live" checked> Live</label>
+          <label><input type="radio" name="env" value="paper"> Paper</label>
+        </fieldset>
+        <details class="opts">
+          <summary>Options</summary>
+          <div class="row two">
+            <label>Benchmarks<input id="bench" value="SPY QQQ" spellcheck="false"></label>
+            <label>Start date (optional)<input id="start" type="date"></label>
+          </div>
+        </details>
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="remember"> Remember keys on this device</label>
+      </div>
+      <div class="row two" id="passrow" hidden>
+        <label>Passphrase (recommended)<input id="pass" type="password" autocomplete="new-password"
+          placeholder="Encrypts the saved keys"></label>
+        <p class="hint">Saved keys live in this browser's <code>localStorage</code> for
+          <b id="origin"></b>, which every page on that origin can read. With a passphrase they're stored
+          AES-GCM encrypted and you'll enter the passphrase on each visit.</p>
+      </div>
+      <div class="row actions">
+        <button type="submit" id="run" class="primary">Analyze my account</button>
+        <button type="button" id="forget" class="ghost" hidden>Forget saved keys</button>
+        <span id="savedNote" class="muted"></span>
+      </div>
+    </form>
+    <p class="fine">Alpaca API keys can place trades. This page only makes <code>GET</code> requests, but you're trusting
+      its code, so read the <a href="https://github.com/destenson/alpaca-trade-history/tree/main/web" rel="noopener">source</a>
+      or try a paper account first.</p>
+  </section>
+
+  <section class="card" id="unlock" hidden>
+    <form id="unlockForm" autocomplete="off" class="row actions">
+      <label class="grow">Passphrase for saved keys<input id="unlockPass" type="password" autocomplete="current-password"></label>
+      <button type="submit" class="primary">Unlock &amp; analyze</button>
+      <button type="button" id="unlockForget" class="ghost">Forget saved keys</button>
+    </form>
+    <p id="unlockErr" class="err" hidden></p>
+  </section>
+
+  <section class="card" id="progress" hidden>
+    <ol id="steps"></ol>
+    <p id="error" class="err" hidden></p>
+  </section>
+
+  <section id="result" hidden>
+    <div class="bar">
+      <div id="summary" class="summary"></div>
+      <div class="actions">
+        <div class="seg" role="tablist">
+          <button type="button" id="viewFull" class="on">Full report</button>
+          <button type="button" id="viewShare">Shareable view</button>
+        </div>
+        <button type="button" id="dlFull" class="ghost">Download full</button>
+        <button type="button" id="dlShare" class="ghost">Download shareable</button>
+        <button type="button" id="again" class="ghost">Start over</button>
+      </div>
+    </div>
+    <iframe id="frame" title="Report" sandbox="allow-scripts allow-downloads"></iframe>
+  </section>
+</main>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"
+        integrity="sha384-i3R37b3tF+HWudsUf1VSEOY2YxwSNMqY8DQa9Z0O3xh+NkJ9o+yjcGyIi5huj+nB" crossorigin="anonymous"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

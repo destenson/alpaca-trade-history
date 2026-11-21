@@ -7,6 +7,7 @@ data/
 reports/
 *.html
 !alpaca_analyzer/templates/*.html
+!web/*.html
 .env
 build/
 site/
