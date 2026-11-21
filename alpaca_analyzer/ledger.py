@@ -226,6 +226,7 @@ class Lot:
     combo_id: int | None = None
     origin: str = "trade"
     fee_per_unit: float = 0.0
+    order_key: str = ""     # opening order (order_id, or timestamp when there is none)
 
 
 @dataclass
@@ -244,6 +245,8 @@ class ClosedTrade:
     combo_id: int | None
     origin: str = "trade"
     fees: float = 0.0       # open + close fees attributable to this lot (negative)
+    open_key: str = ""      # opening order
+    close_key: str = ""     # closing order
 
     @property
     def pnl(self) -> float:
@@ -279,16 +282,36 @@ class Ledger:
     warnings: list[str]
 
     # ------------------------------------------------------------ dataframes
-    def closed_df(self) -> pd.DataFrame:
+    def closed_df(self, merge_fills: bool = True) -> pd.DataFrame:
+        """Closed trades. With ``merge_fills`` (default), FIFO fragments that came from the same opening
+        order and the same closing order - i.e. partial fills - are one trade, so trade counts and win
+        rates don't depend on how an order happened to be filled."""
         rows = [{
             "symbol": c.symbol, "underlying": c.underlying, "asset": c.asset, "direction": c.direction,
             "qty": c.qty, "open_time": c.open_time, "close_time": c.close_time, "open_price": c.open_price,
             "close_price": c.close_price, "multiplier": c.multiplier, "close_kind": c.close_kind,
             "combo_id": c.combo_id, "pnl": c.pnl, "cost": c.cost, "origin": c.origin, "fees": c.fees,
+            "open_key": c.open_key, "close_key": c.close_key,
         } for c in self.closed]
         df = pd.DataFrame(rows)
         if df.empty:
             return df
+        if merge_fills:
+            df["_open_amt"] = df["open_price"] * df["qty"]
+            df["_close_amt"] = df["close_price"] * df["qty"]
+            keys = ["symbol", "direction", "open_key", "close_key", "close_kind", "combo_id"]
+            df = (df.groupby(keys, dropna=False, sort=False)
+                    .agg(underlying=("underlying", "first"), asset=("asset", "first"), qty=("qty", "sum"),
+                         open_time=("open_time", "min"), close_time=("close_time", "max"),
+                         _open_amt=("_open_amt", "sum"), _close_amt=("_close_amt", "sum"),
+                         multiplier=("multiplier", "first"), pnl=("pnl", "sum"), cost=("cost", "sum"),
+                         origin=("origin", "first"), fees=("fees", "sum"))
+                    .reset_index())
+            df["open_price"] = df["_open_amt"] / df["qty"]
+            df["close_price"] = df["_close_amt"] / df["qty"]
+            df = df.drop(columns=["_open_amt", "_close_amt"]).sort_values("close_time", kind="stable")
+            df["combo_id"] = df["combo_id"].astype("object").where(df["combo_id"].notna(), None)
+            df = df.reset_index(drop=True)
         df["open_time"] = pd.to_datetime(df["open_time"], utc=True).dt.tz_convert(NY)
         df["close_time"] = pd.to_datetime(df["close_time"], utc=True).dt.tz_convert(NY)
         df["hold_days"] = (df["close_time"] - df["open_time"]).dt.total_seconds() / 86400
@@ -334,7 +357,8 @@ def build_ledger(events: list[Event], combo_window_s: float = 120.0) -> Ledger:
             closed.append(ClosedTrade(
                 ev.symbol, ev.underlying, "option" if ev.is_option else "stock",
                 "long" if lot.qty > 0 else "short", take, lot.time, ev.time, lot.price, price,
-                lot.multiplier, kind, lot.combo_id, lot.origin, lot.fee_per_unit * take + close_fee))
+                lot.multiplier, kind, lot.combo_id, lot.origin, lot.fee_per_unit * take + close_fee,
+                lot.order_key or lot.time.isoformat(), ev.order_id or ev.time.isoformat()))
             lot.qty += take if lot.qty < 0 else -take
             q += take if q < 0 else -take
             if abs(lot.qty) < EPS:
@@ -396,7 +420,8 @@ def build_ledger(events: list[Event], combo_window_s: float = 120.0) -> Ledger:
                 combo_id = assign_combo(ev, residual) if ev.is_option else None
                 lots[ev.symbol].append(Lot(ev.symbol, residual, ev.price, ev.time, ev.multiplier, combo_id,
                                            "assignment" if ev.kind == "delivery" else "trade",
-                                           ev.fee / abs(ev.qty) if ev.qty else 0.0))
+                                           ev.fee / abs(ev.qty) if ev.qty else 0.0,
+                                           ev.order_id or ev.time.isoformat()))
         elif ev.kind == "spin":
             lots[ev.symbol].append(Lot(ev.symbol, ev.qty, ev.price, ev.time, 1.0, None, "spinoff"))
             warnings.append(f"{ev.ny_date} spinoff {ev.symbol} x{ev.qty:g} booked at {ev.price:g} (basis not "

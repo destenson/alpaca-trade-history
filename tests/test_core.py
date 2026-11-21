@@ -132,3 +132,18 @@ def test_end_to_end_report(tmp_path):
     out = render(a, tmp_path / "r.html")
     html = out.read_text()
     assert "f_equity" in html and "f_strat" in html
+
+
+def test_partial_fills_count_as_one_trade():
+    acts = [fill("2026-01-05T15:00:00Z", "XYZ", "buy", 89, 1.70, "o1"),
+            fill("2026-01-05T15:00:01Z", "XYZ", "buy", 1, 1.70, "o1"),
+            fill("2026-01-05T15:00:03Z", "XYZ", "buy", 10, 1.71, "o1"),
+            fill("2026-01-07T15:00:00Z", "XYZ", "sell", 60, 1.50, "o2"),
+            fill("2026-01-07T15:00:02Z", "XYZ", "sell", 40, 1.50, "o2")]
+    L = ledger_of(acts)
+    assert len(L.closed) > 1                       # raw FIFO fragments
+    t = L.closed_df()
+    assert len(t) == 1 and t.iloc[0]["qty"] == 100
+    assert t.iloc[0]["pnl"] == pytest.approx(sum(c.pnl for c in L.closed))
+    assert t.iloc[0]["open_price"] == pytest.approx((89 * 1.70 + 1 * 1.70 + 10 * 1.71) / 100)
+    assert len(L.closed_df(merge_fills=False)) == len(L.closed)
