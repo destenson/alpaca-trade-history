@@ -4,6 +4,8 @@ Portfolio and trade analytics for an **Alpaca** brokerage account. It pulls your
 (read-only), rebuilds every position with FIFO lot matching, groups option legs into strategies, and
 writes one self-contained, interactive HTML report.
 
+Try it now [in your browser](https://destenson.github.io/alpaca-trade-history/)
+
 ## What's in the report
 
 | Tab | Contents |
