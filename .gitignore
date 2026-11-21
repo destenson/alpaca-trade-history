@@ -8,3 +8,5 @@ reports/
 *.html
 !alpaca_analyzer/templates/*.html
 .env
+build/
+site/

@@ -143,7 +143,7 @@ function show(id) {
   requestAnimationFrame(drawVisible);
 }
 document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', e => {
-  e.preventDefault(); history.replaceState(null, '', '#' + a.dataset.tab); show(a.dataset.tab);
+  e.preventDefault(); try { history.replaceState(null, '', '#' + a.dataset.tab); } catch (err) {} show(a.dataset.tab);
 }));
 document.getElementById('theme').addEventListener('click', () => {
   const root = document.documentElement;

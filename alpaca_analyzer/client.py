@@ -10,8 +10,6 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
-import requests
-
 LIVE_URL = "https://api.alpaca.markets"
 PAPER_URL = "https://paper-api.alpaca.markets"
 DATA_URL = "https://data.alpaca.markets"
@@ -44,6 +42,8 @@ class AlpacaClient:
             self.base_url = self.base_url[:-3]
         self.data_url = data_url.rstrip("/")
         self.timeout = timeout
+        import requests  # not needed (or available) in the browser build
+
         self.s = requests.Session()
         self.s.headers.update({"APCA-API-KEY-ID": key_id, "APCA-API-SECRET-KEY": secret,
                                "Accept": "application/json", "User-Agent": "alpaca-analyzer/0.1"})

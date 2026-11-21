@@ -20,6 +20,7 @@ from .occ import parse_occ
 from .optionsmath import payoff_curves
 
 PLOTLY_CDN = "https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"
+PLOTLY_SRI = "sha384-cCVCZkAjYNxaYKbM8lsArLznDF/SvMFr1jcZrvOpSTCa0W40ZAdLzHCEulnUa5i7"
 TEMPLATE = Path(__file__).with_name("templates") / "report.html"
 
 S1, S2, S3, S4, S5, S6, S7, S8 = (f"var:series-{i}" for i in range(1, 9))
@@ -123,7 +124,7 @@ class Report:
         self.sections.append((sid, title, body))
 
     # -- render -------------------------------------------------------------
-    def render(self, path: str | Path, inline_js: str | None = None) -> Path:
+    def to_html(self, inline_js: str | None = None) -> str:
         self.build()
         tpl = TEMPLATE.read_text()
         nav = "".join(f'<a href="#{sid}" data-tab="{sid}">{html.escape(t)}</a>' for sid, t, _ in self.sections)
@@ -135,15 +136,18 @@ class Report:
             span = f"{a.equity.index[0]:%b %d, %Y} – {a.equity.index[-1]:%b %d, %Y}"
         if self.share:
             span += f" · shared view: $ normalized to a {money(self.notional, dp=0)} account"
-        script = f'<script>{inline_js}</script>' if inline_js else f'<script src="{PLOTLY_CDN}"></script>'
-        out = (tpl.replace("{{NAV}}", nav).replace("{{BODY}}", body).replace("{{SPAN}}", html.escape(span))
-               .replace("{{GENERATED}}", datetime.now().strftime("%Y-%m-%d" if self.share else "%Y-%m-%d %H:%M"))
-               .replace("{{PLOTLY}}", script)
-               .replace("{{FIGS}}", json.dumps(_clean(self.figs), default=_json_default, allow_nan=False)
-                        .replace("</", "<\\/")))
+        script = (f'<script>{inline_js}</script>' if inline_js else
+                  f'<script src="{PLOTLY_CDN}" integrity="{PLOTLY_SRI}" crossorigin="anonymous"></script>')
+        return (tpl.replace("{{NAV}}", nav).replace("{{BODY}}", body).replace("{{SPAN}}", html.escape(span))
+                .replace("{{GENERATED}}", datetime.now().strftime("%Y-%m-%d" if self.share else "%Y-%m-%d %H:%M"))
+                .replace("{{PLOTLY}}", script)
+                .replace("{{FIGS}}", json.dumps(_clean(self.figs), default=_json_default, allow_nan=False)
+                         .replace("</", "<\\/")))
+
+    def render(self, path: str | Path, inline_js: str | None = None) -> Path:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(out)
+        p.write_text(self.to_html(inline_js))
         return p
 
     # ======================================================================

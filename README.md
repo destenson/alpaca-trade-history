@@ -76,7 +76,26 @@ Per-trade rows show percentages only. That's deliberate: a dollar amount next to
 and a 1-lot trade would let someone back out the normalization factor, and from it your account size.
 Name, email, account number and API keys are never written to any report.
 
-## How the numbers are computed
+## Web app (GitHub Pages)
+
+`web/` is a static page that runs the same analysis for anyone with Alpaca keys, entirely in their
+browser: it calls Alpaca's API directly (GET requests only; Alpaca allows browser access) and runs
+this Python package via [Pyodide](https://pyodide.org) (WebAssembly). Nothing is sent to any other server.
+The first visit downloads ~20 MB of Python/pandas, which the browser then caches.
+
+* **Keys**: held in memory by default. "Remember keys on this device" stores them in `localStorage`.
+  Add a passphrase and they're stored AES-GCM-encrypted (PBKDF2-SHA256 key derivation), and the
+  passphrase is asked for on each visit. Without one they're stored in plain text, readable by any page
+  on the same origin (all of a user's `*.github.io` project sites share one).
+* **Isolation**: a Content-Security-Policy limits network access to Alpaca's hosts and the pinned CDN
+  (scripts carry SRI hashes). The report renders in a sandboxed iframe with no access to the page's
+  storage. Both the full and the shareable (`--share`) report can be downloaded.
+* **Deploy**: `.github/workflows/pages.yml` runs the tests, builds the site with
+  `python scripts/build_site.py site`, and publishes it. One-time setup: repo **Settings → Pages →
+  Source: GitHub Actions**.
+* **Local preview**: `python scripts/build_site.py site && python -m http.server -d site 8000`.
+
+
 
 * **Effective prices (cost ÷ quantity, fees included).** Every fee is folded into the fill it belongs
   to before lots are matched. Fees carrying an `order_id` (OCC clearing) go to that order's fills;
