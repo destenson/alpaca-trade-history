@@ -76,6 +76,10 @@ td.pos { color: var(--gain-text); } td.neg { color: var(--loss-text); }
 .prose ul { margin: 4px 0; padding-left: 20px; } .prose li { margin: 6px 0; color: var(--ink-2); }
 .prose b { color: var(--ink); }
 .empty { color: var(--muted); }
+.pick { display: flex; gap: 8px; align-items: center; margin: 8px 0 10px; color: var(--ink-2); font-size: 12.5px; }
+.pick select { font: inherit; font-size: 13px; color: var(--ink); background: var(--page); border: 1px solid var(--axis);
+  border-radius: 8px; padding: 6px 8px; max-width: 100%; flex: 1 1 auto; }
+.interp-view .tablewrap { max-height: none; margin-bottom: 8px; }
 .alert { grid-column: 1 / -1; border: 1px solid var(--loss); border-left-width: 4px; border-radius: 10px;
   background: color-mix(in srgb, var(--loss) 8%, var(--surface)); padding: 10px 16px; }
 .alert ul { margin: 4px 0 0; padding-left: 18px; color: var(--ink-2); }
@@ -132,7 +136,7 @@ function draw(id) {
   drawn.add(id);
 }
 function drawVisible() {
-  document.querySelectorAll('section.tab.on .plot').forEach(el => draw(el.id));
+  document.querySelectorAll('section.tab.on .plot').forEach(el => { if (el.offsetParent !== null) draw(el.id); });
 }
 function show(id) {
   const secs = document.querySelectorAll('section.tab');
@@ -165,6 +169,12 @@ window.addEventListener('message', (e) => {
   if (EMBEDDED && e.source === window.parent && e.data && e.data.type === 'aa-set-theme') setTheme(e.data.theme, false);
 });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { drawn.clear(); drawVisible(); });
+// alternative readings of open positions: one view visible at a time
+document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('change', () => {
+  const box = document.getElementById(sel.dataset.box);
+  box.querySelectorAll(':scope > .interp-view').forEach(v => { v.hidden = v.id !== sel.value; });
+  box.querySelectorAll('#' + sel.value + ' .plot').forEach(el => draw(el.id));
+}));
 // sortable tables
 document.querySelectorAll('table.sortable').forEach(t => {
   t.querySelectorAll('th').forEach((th, i) => th.addEventListener('click', () => {

@@ -17,6 +17,7 @@ import pandas as pd
 from .analysis import Analysis
 from .ledger import NY
 from .occ import parse_occ
+from .interpret import build_units, readings
 from .optionsmath import payoff_curves
 
 PLOTLY_CDN = "https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"
@@ -680,11 +681,9 @@ class Report:
         greek_rows = []
         for i, (und, g) in enumerate(oo.groupby("underlying")):
             spot = _spot_from(a, und, g)
-            legs = []
             for _, r in g.iterrows():
                 snap = a.bundle.option_snapshots.get(r["symbol"], {})
                 iv = snap.get("impliedVolatility")
-                legs.append({"symbol": r["symbol"], "qty": r["qty"], "cost": r["cost_basis"], "iv": iv})
                 gk = snap.get("greeks") or {}
                 if gk:
                     greek_rows.append({"Underlying": und, "Contract": _leg(r["symbol"]), "Qty": r["qty"],
@@ -695,34 +694,13 @@ class Report:
             sh = op[(op["asset"] == "stock") & (op["symbol"] == und)]
             shares = float(sh["qty"].sum()) if len(sh) else 0.0
             share_cost = float(sh["cost_basis"].sum()) if len(sh) else 0.0
+            share_value = float(sh["market_value"].fillna(0).sum()) if len(sh) else 0.0
             if shares:
                 greek_rows.append({"Underlying": und, "Contract": "shares", "Qty": shares, "IV": None,
                                    "Δ shares": shares, "Γ": 0.0, "Θ $/day": 0.0, "Vega $/vol-pt": 0.0})
             if not spot:
                 continue
-            pc = payoff_curves(legs, spot, today, shares, share_cost)
-            exps = sorted({parse_occ(l["symbol"]).expiry for l in legs})
-            data = [{"type": "scatter", "mode": "lines", "name": "At expiration", "x": pc["x"], "y": pc["expiry"],
-                     "line": {"color": S1, "width": 2}},
-                    {"type": "scatter", "mode": "lines", "name": "Today (Black-Scholes, snapshot IV)", "x": pc["x"],
-                     "y": pc["today"], "line": {"color": S2, "width": 2, "dash": "dash"}}]
-            shapes = [{"type": "line", "x0": spot, "x1": spot, "yref": "paper", "y0": 0, "y1": 1,
-                       "line": {"color": "var:muted", "width": 1, "dash": "dot"}},
-                      {"type": "line", "xref": "paper", "x0": 0, "x1": 1, "y0": 0, "y1": 0,
-                       "line": {"color": "var:axis", "width": 1}}]
-            be = ", ".join(f"${b:,.2f}" for b in pc["breakevens"]) or "none in range"
-            stock_note = f" + {shares:g} shares" if shares else ""
-            out.append(self.fig(f"f_payoff_{i}", data, {"shapes": shapes, "xaxis": {"tickprefix": "$", "title": {"text": f"{und} price"}},
-                                                         "yaxis": {"tickprefix": "$"}, "hovermode": "x unified",
-                                                         "annotations": [{"x": spot, "yref": "paper", "y": 1, "text": f"spot ${spot:,.2f}",
-                                                                          "showarrow": False, "yanchor": "bottom",
-                                                                          "font": {"size": 11}}]}, 300,
-                                title=f"{und} open position payoff",
-                                subtitle=f"{len(legs)} option legs{stock_note} · expiries {', '.join(f'{d:%m/%d}' for d in exps)}"
-                                         f" · breakevens {be} · max gain {money(pc['max_profit'], True, 0)} · "
-                                         f"max loss {money(pc['max_loss'], True, 0)} in plotted range",
-                                note="Expiration curve values every leg at intrinsic value, which ignores remaining "
-                                     "time value on later-dated legs."))
+            out.append(self._readings_card(i, und, g, spot, today, shares, share_cost, share_value))
         html_g = ""
         if greek_rows:
             gdf = pd.DataFrame(greek_rows)
@@ -737,6 +715,86 @@ class Report:
                                          "Θ $/day": lambda v: money(v, True), "Vega $/vol-pt": lambda v: money(v, True)},
                                    tid="t_greeks", pnl_cols=("Θ $/day",)) + '</figure>')
         return "".join(out) + html_g
+
+    def _readings_card(self, i, und, g, spot, today, shares, share_cost, share_value) -> str:
+        """Every way to split this underlying's open legs into recognised strategies."""
+        a = self.a
+        rows = [{"symbol": r["symbol"], "qty": float(r["qty"]), "cost_basis": float(r["cost_basis"]),
+                 "market_value": float(r["market_value"]) if pd.notna(r["market_value"]) else 0.0}
+                for _, r in g.iterrows()]
+        units, odd, split = build_units(rows, shares, share_cost, share_value, a.bundle.option_snapshots)
+        # as-opened grouping from the ledger: open lots that share a strategy id
+        by_combo: dict = {}
+        for sym in g["symbol"]:
+            for lot in a.ledger.open_lots.get(sym, []):
+                n = int(round(abs(lot.qty))) if split else 1
+                by_combo.setdefault(lot.combo_id or f"solo-{sym}", []).extend([sym] * max(n, 1))
+        rs, whole = readings(units, spot, today, list(by_combo.values()), odd)
+        if not rs:
+            return ""
+        n_legs = len(g)
+        stock_note = f" + {shares:g} shares" if shares else ""
+        head = (f"Whole position: max gain {_lim(whole['max_gain'])} · max loss {_lim(whole['max_loss'])} · "
+                f"breakevens {', '.join(f'${b:,.2f}' for b in whole['breakevens']) or 'none'} · unrealized "
+                f"{money(whole['unrealized'], True)}" +
+                (f" · Δ {num(whole['greeks'].get('delta', 0), 1)} sh · Θ {money(whole['greeks'].get('theta', 0), True)}/day"
+                 if whole["greeks"].get("theta") else ""))
+        opts, views = [], []
+        for j, r in enumerate(rs):
+            vid = f"iv_{i}_{j}"
+            tag = "As opened: " if r.as_opened else ""
+            warn = f" ({r.undefined} undefined-risk)" if r.undefined else ""
+            opts.append(f'<option value="{vid}">{html.escape(tag + r.label + warn)}</option>')
+            data = []
+            cols = [S1, S2, S3, S4, S5, S6, S7, S8]
+            for k, grp in enumerate(r.groups):
+                data.append({"type": "scatter", "mode": "lines", "name": f"{grp.strategy} ({grp.legs_label})",
+                             "x": grp.curve_x, "y": grp.curve_expiry, "line": {"color": cols[k % 8], "width": 2}})
+            data.append({"type": "scatter", "mode": "lines", "name": "Whole position at expiration", "x": whole["x"],
+                         "y": whole["expiry"], "line": {"color": "var:ink", "width": 2, "dash": "dash"}})
+            data.append({"type": "scatter", "mode": "lines", "name": "Whole position today", "x": whole["x"],
+                         "y": whole["today"], "line": {"color": NEUTRAL, "width": 2, "dash": "dot"}})
+            shapes = [{"type": "line", "x0": spot, "x1": spot, "yref": "paper", "y0": 0, "y1": 1,
+                       "line": {"color": "var:muted", "width": 1, "dash": "dot"}},
+                      {"type": "line", "xref": "paper", "x0": 0, "x1": 1, "y0": 0, "y1": 0,
+                       "line": {"color": "var:axis", "width": 1}}]
+            fig = self.fig(f"f_read_{i}_{j}", data, {
+                "shapes": shapes, "hovermode": "x unified", "showlegend": True,
+                "legend": {"orientation": "h", "y": -0.22, "yanchor": "top"},
+                "xaxis": {"tickprefix": "$", "title": {"text": f"{und} price at expiration"}},
+                "yaxis": {"tickprefix": "$"},
+                "annotations": [{"x": spot, "yref": "paper", "y": 1, "text": f"spot ${spot:,.2f}", "showarrow": False,
+                                 "yanchor": "bottom", "font": {"size": 11}}]}, 380)
+            tbl = pd.DataFrame([{
+                "Strategy": grp.strategy, "Legs": grp.legs_label, "Cost": grp.cost, "Value": grp.value,
+                "Unrealized": grp.unrealized, "Max gain": grp.max_gain, "Max loss": grp.max_loss,
+                "Breakevens": ", ".join(f"${b:,.2f}" for b in grp.breakevens) or "–",
+                "Δ sh": grp.greeks.get("delta", math.nan), "Θ $/day": grp.greeks.get("theta", math.nan)}
+                for grp in r.groups])
+            sum_loss = r.sum_max_loss
+            n_strat = sum(1 for grp in r.groups if grp.strategy != "Odd-lot shares")
+            summary = (f"<p class=\"sub\">{n_strat} strateg{'ies' if n_strat != 1 else 'y'} · sum of each one's own max "
+                       f"loss {_lim(sum_loss)}"
+                       + (" (margin-style worst case: the groups' worst prices differ, so this overstates what the "
+                          "legs can lose together, but it's what you could be left exposed to after closing some "
+                          "groups and keeping others)" if n_strat > 1 and not math.isinf(sum_loss) else "")
+                       + ".</p>")
+            views.append(f'<div class="interp-view" id="{vid}"{"" if j == 0 else " hidden"}>{summary}'
+                         + self.table(tbl, {"Cost": lambda v: money(v, True), "Value": lambda v: money(v, True),
+                                            "Unrealized": lambda v: money(v, True), "Max gain": _lim, "Max loss": _lim,
+                                            "Δ sh": lambda v: num(v, 1), "Θ $/day": lambda v: money(v, True)},
+                                      tid=f"t_read_{i}_{j}", pnl_cols=("Unrealized",)) + fig + "</div>")
+        more = "" if split else (" Legs with several contracts are kept whole here (too many contracts to split "
+                                 "every way).")
+        return (f'<figure class="card wide"><h3>{html.escape(und)}: {len(rs)} way{"s" if len(rs) != 1 else ""} to read '
+                f'{n_legs} open leg{"s" if n_legs != 1 else ""}{stock_note}</h3>'
+                f'<p class="sub">{head}</p>'
+                f'<label class="pick">Interpretation <select class="interp" data-box="ib_{i}">{"".join(opts)}</select></label>'
+                f'<div id="ib_{i}">{"".join(views)}</div>'
+                f'<p class="note">Every reading is the same legs, so total P&L is identical. What changes is how '
+                f'risk is grouped: per-group max loss and breakevens, and what you\'d be left holding if you closed '
+                f'one group. Expiration curves value all legs at intrinsic, ignoring time value left on later-dated '
+                f'legs of calendars/diagonals.{more}</p></figure>')
 
     # ------------------------------------------------------------ positions
     def _positions(self):
@@ -876,6 +934,14 @@ def _nice_bins(s: pd.Series, target: int = 24):
     edges = np.arange(start, hi + step, step)
     # keep zero on an edge so wins and losses never share a bar
     return edges if len(edges) > 1 else np.array([lo - 1, hi + 1])
+
+
+def _lim(v) -> str:
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return "–"
+    if math.isinf(v):
+        return "unlimited"
+    return money(v, True)
 
 
 def _leg(sym: str) -> str:

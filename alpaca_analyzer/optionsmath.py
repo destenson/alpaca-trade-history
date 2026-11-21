@@ -25,7 +25,7 @@ def bs_price(S, K, T, sigma, right, r=0.04):
 
 
 def payoff_curves(legs: list[dict], spot: float, today: date, shares: float = 0.0,
-                  share_cost: float = 0.0, n: int = 241) -> dict:
+                  share_cost: float = 0.0, n: int = 241, xs: np.ndarray | None = None) -> dict:
     """legs: [{symbol, qty, cost (total $ paid, signed), iv}] -> P&L curves vs underlying price.
 
     ``expiry`` curve: every leg at intrinsic value (the payoff once the nearest expiry has passed,
@@ -33,9 +33,12 @@ def payoff_curves(legs: list[dict], spot: float, today: date, shares: float = 0.
     leg's implied volatility.
     """
     strikes = [parse_occ(l["symbol"]).strike for l in legs]
-    lo = min(strikes + [spot]) * 0.8
-    hi = max(strikes + [spot]) * 1.2
-    xs = np.linspace(lo, hi, n)
+    if xs is None:
+        lo = min(strikes + [spot]) * 0.8
+        hi = max(strikes + [spot]) * 1.2
+        xs = np.linspace(lo, hi, n)
+    xs = np.asarray(xs, dtype=float)
+    n = len(xs)
     at_exp = np.full(n, -sum(l["cost"] for l in legs)) + shares * xs - share_cost
     now = at_exp.copy()
     for l in legs:
