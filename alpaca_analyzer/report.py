@@ -492,16 +492,17 @@ class Report:
                          "x": s3["realized"].round(2).tolist(), "marker": {"color": S1}},
                         {"type": "bar", "orientation": "h", "name": "Buy & hold P&L", "y": s3.index.tolist(),
                          "x": s3["bhc_pnl"].round(2).tolist(), "marker": {"color": S2},
-                         "customdata": np.c_[s3["peak_capital"], s3["bhc_return"]].tolist(),
+                         "customdata": np.c_[s3["bhc_capital"], s3["bhc_return"]].tolist(),
                          "text": [str(d) for d in s3["bhc_end"]],
                          "hovertemplate": "%{y}: %{x:$,.2f}<br>%{customdata[0]:$,.0f} held from first trade to "
-                                          "your last exit %{text} (%{customdata[1]:+.1%})<extra>Buy & hold</extra>"}]
+                                          "your last close %{text} (%{customdata[1]:+.1%})<extra>Buy & hold</extra>"}]
                 parts.append(self.fig("f_edge", data, {"barmode": "group", "xaxis": {"tickprefix": "$"},
                                                        "margin": {"l": 84}, "bargap": 0.25},
                                       max(300, 30 * len(s3) + 80), title="Your trading vs. just holding the underlying",
-                                      subtitle="Names you've fully exited. Buy & hold = your peak capital committed to "
-                                               "that name, bought on your first trade date and sold on your last exit. "
-                                               "Sorted by your edge."))
+                                      subtitle="Realized P&L of closed lots vs. buy & hold over the same span: your "
+                                               "peak capital committed to that name up to your last closed lot, bought "
+                                               "on your first trade date and sold on that last close. Positions still "
+                                               "open are not counted. Sorted by your edge."))
 
         # timing
         tt = t.assign(wd=t["open_time"].dt.dayofweek, hr=t["open_time"].dt.hour)

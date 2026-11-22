@@ -153,3 +153,36 @@ def test_trades_tab_is_closed_positions_only():
     fig = r.figs["f_bysym"]["data"][0]
     assert fig["y"] == ["AAA"] and fig["x"] == [20.0]          # BBB (open, unrealized +300) is not here
     assert a.symbols.loc["AAA", "bhc_end"] == date(2026, 1, 8)
+
+
+def test_buy_and_hold_counts_partially_closed_names():
+    acts = [{"activity_type": "CSD", "date": "2026-01-05", "net_amount": "10000"},
+            {"activity_type": "FILL", "transaction_time": "2026-01-06T15:00:00Z", "symbol": "CCC", "side": "buy",
+             "qty": "10", "price": "10"},
+            {"activity_type": "FILL", "transaction_time": "2026-01-08T15:00:00Z", "symbol": "CCC", "side": "sell",
+             "qty": "5", "price": "12"},                                  # 5 closed, 5 still open
+            {"activity_type": "FILL", "transaction_time": "2026-01-09T15:00:00Z", "symbol": "CCC", "side": "buy",
+             "qty": "100", "price": "13"}]                                # after the last close: not in the window
+    b = Bundle(activities=acts, positions=[{"symbol": "CCC", "asset_class": "us_equity", "qty": "105",
+                                            "avg_entry_price": "12.9", "current_price": "13", "market_value": "1365",
+                                            "cost_basis": "1350", "unrealized_pl": "15"}])
+    s = analysis.run(b).symbols.loc["CCC"]
+    assert s["is_open"] and s["realized"] == pytest.approx(10)
+    assert s["bhc_end"] == date(2026, 1, 8) and s["bhc_capital"] == pytest.approx(100)
+    assert s["bhc_pnl"] == pytest.approx(100 * (12 / 10 - 1))
+
+
+def test_buy_and_hold_for_options_only_name_uses_bars():
+    sym = "DDD260116C00050000"
+    acts = [{"activity_type": "CSD", "date": "2026-01-05", "net_amount": "10000"},
+            {"activity_type": "FILL", "transaction_time": "2026-01-06T15:00:00Z", "symbol": sym, "side": "buy",
+             "qty": "2", "price": "1.00"},
+            {"activity_type": "FILL", "transaction_time": "2026-01-09T15:00:00Z", "symbol": sym, "side": "sell",
+             "qty": "1", "price": "1.50"}]                                # half closed, half still open
+    bars = {"DDD": [{"t": f"2026-01-{d:02d}T05:00:00Z", "c": c} for d, c in ((5, 48), (6, 50), (8, 52), (9, 55))]}
+    b = Bundle(activities=acts, bars=bars,
+               positions=[{"symbol": sym, "asset_class": "us_option", "qty": "1", "avg_entry_price": "1.0",
+                           "current_price": "1.2", "market_value": "120", "cost_basis": "100", "unrealized_pl": "20"}])
+    s = analysis.run(b).symbols.loc["DDD"]
+    assert s["realized"] == pytest.approx(50) and s["bhc_end"] == date(2026, 1, 9)
+    assert s["bhc_capital"] == pytest.approx(200) and s["bhc_pnl"] == pytest.approx(200 * (55 / 50 - 1))

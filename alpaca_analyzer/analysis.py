@@ -363,6 +363,7 @@ def _symbol_scorecard(a: Analysis, marks: dict[str, float]) -> pd.DataFrame:
         if e.kind == "trade":
             first_touch.setdefault(e.underlying, e.ny_date)
     peak_capital = _peak_capital(a.ledger)
+    peak_to_close = _peak_capital(a.ledger, until=last_close.to_dict())
     for und in df.index:
         d0 = first_touch.get(und)
         if d0 is None or (a.start and d0 < a.start):
@@ -378,8 +379,10 @@ def _symbol_scorecard(a: Analysis, marks: dict[str, float]) -> pd.DataFrame:
         if p0 and p1 and cap:
             bh_rows.setdefault(und, {}).update({"bh_start": d0, "bh_p0": p0, "bh_p1": p1, "peak_capital": cap,
                             "bh_return": p1 / p0 - 1, "bh_pnl": cap * (p1 / p0 - 1)})
-        # closed-only view (Trades tab): names fully exited, held from first trade to the last exit
-        if und not in open_unds and und in last_close.index and p0 and cap:
+        # realized view (Trades tab): every name with closed lots, held from the first trade to the last
+        # closed lot, with the peak capital committed up to that day
+        cap_c = peak_to_close.get(und, 0.0)
+        if und in last_close.index and p0 and cap_c:
             d1 = last_close[und]
             p1c = None
             if closes is not None and len(closes[closes.index <= d1]):
@@ -389,8 +392,8 @@ def _symbol_scorecard(a: Analysis, marks: dict[str, float]) -> pd.DataFrame:
                 if len(st) and st["close_time"].iloc[-1].tz_convert(NY).date() == d1:
                     p1c = float(st["close_price"].iloc[-1])
             if p1c:
-                bh_rows.setdefault(und, {}).update(bhc_end=d1, bhc_return=p1c / p0 - 1,
-                                                   bhc_pnl=cap * (p1c / p0 - 1), peak_capital=cap)
+                bh_rows.setdefault(und, {}).update(bhc_end=d1, bhc_return=p1c / p0 - 1, bhc_capital=cap_c,
+                                                   bhc_pnl=cap_c * (p1c / p0 - 1))
     bh = pd.DataFrame.from_dict(bh_rows, orient="index")
     df = df.join(bh)
     if "bh_pnl" in df:
@@ -400,14 +403,18 @@ def _symbol_scorecard(a: Analysis, marks: dict[str, float]) -> pd.DataFrame:
     return df.sort_values("total_pnl")
 
 
-def _peak_capital(ledger: Ledger) -> dict[str, float]:
-    """Peak gross capital simultaneously committed per underlying (stock cost + option premium/risk)."""
+def _peak_capital(ledger: Ledger, until: dict | None = None) -> dict[str, float]:
+    """Peak gross capital simultaneously committed per underlying (stock cost + option premium/risk).
+
+    ``until``: {underlying: date} - only count events up to and including that day."""
     exposure: dict[str, float] = {}
     peak: dict[str, float] = {}
     lots_cost: dict[str, float] = {}
     pos: dict[str, list[list[float]]] = {}
     for e in ledger.events:
         if e.kind not in ("trade", "delivery", "expired", "assigned", "exercised"):
+            continue
+        if until is not None and (e.underlying not in until or e.ny_date > until[e.underlying]):
             continue
         book = pos.setdefault(e.symbol, [])
         q = e.qty
