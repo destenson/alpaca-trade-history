@@ -733,11 +733,15 @@ class Report:
             for lot in a.ledger.open_lots.get(sym, []):
                 n = int(round(abs(lot.qty))) if split else 1
                 by_combo.setdefault(lot.combo_id or f"solo-{sym}", []).extend([sym] * max(n, 1))
-        rs, whole = readings(units, spot, today, list(by_combo.values()), odd)
+        rs, whole = readings(units, spot, today, list(by_combo.values()))
         if not rs:
             return ""
         n_legs = len(g)
-        stock_note = f" + {shares:g} shares" if shares else ""
+        lot_shares = shares - (odd.qty if odd else 0.0)
+        stock_note = f" + {lot_shares:g} shares" if lot_shares else ""
+        odd_note = (f" {abs(odd.qty):g} odd-lot share{'s' if abs(odd.qty) != 1 else ''} (not a multiple of 100) "
+                    f"{'are' if abs(odd.qty) != 1 else 'is'} left out: shares only count toward a strategy in "
+                    f"100-share lots, one per contract." if odd else "")
         head = (f"Whole position: max gain {_lim(whole['max_gain'])} · max loss {_lim(whole['max_loss'])} · "
                 f"breakevens {', '.join(f'${b:,.2f}' for b in whole['breakevens']) or 'none'} · unrealized "
                 f"{money(whole['unrealized'], True)}" +
@@ -798,7 +802,7 @@ class Report:
                 f'<p class="note">Every reading is the same legs, so total P&L is identical. What changes is how '
                 f'risk is grouped: per-group max loss and breakevens, and what you\'d be left holding if you closed '
                 f'one group. Expiration curves value all legs at intrinsic, ignoring time value left on later-dated '
-                f'legs of calendars/diagonals.{more}</p></figure>')
+                f'legs of calendars/diagonals.{more}{odd_note}</p></figure>')
 
     # --------------------------------------------------------------- orders
     def _orders(self):

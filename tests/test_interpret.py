@@ -1,4 +1,6 @@
 import math
+
+import pytest
 from datetime import date
 
 from alpaca_analyzer.interpret import STOCK, Unit, build_units, name_group, readings
@@ -40,5 +42,14 @@ def test_stock_lots_pair_with_options():
     units, odd, split = build_units([{"symbol": "X261218C00055000", "qty": -2.0, "cost_basis": -300.0,
                                       "market_value": -250.0}], 250, 12500, 12000, {})
     assert split and sum(u.symbol == STOCK for u in units) == 2 and odd.qty == 50
-    rs, _ = readings(units, 50.0, date(2026, 11, 20), None, odd)
+    rs, whole = readings(units, 50.0, date(2026, 11, 20), None)
     assert any(r.label == "Covered call + Covered call" for r in rs)
+    # the 50 odd-lot shares are in no reading and not in the whole-position payoff
+    assert all(sum(u.qty for g in r.groups for u in g.units if u.symbol == STOCK) == 200 for r in rs)
+    assert whole["max_gain"] == pytest.approx(2 * 100 * 55 - 2 * 100 * 50 + 300)
+
+
+def test_round_lots_kept_when_too_many_units_to_split():
+    rows = [{"symbol": "X261218C00055000", "qty": -9.0, "cost_basis": -900.0, "market_value": -800.0}]
+    units, odd, split = build_units(rows, 950, 47500, 47000, {})
+    assert not split and [u.qty for u in units if u.symbol == STOCK] == [900] and odd.qty == 50

@@ -206,11 +206,12 @@ def _position_units(open_positions, und: str, snapshots: dict, today: date) -> l
                            float(r["market_value"]) if r["market_value"] == r["market_value"] else 0.0,
                            {}, snap.get("impliedVolatility")))
         elif r["asset"] == "stock" and sym == und:
-            us.append(Unit(STOCK, float(r["qty"]), float(r["cost_basis"]),
-                           float(r["market_value"]) if r["market_value"] == r["market_value"] else 0.0))
-    # a few odd shares barely move the payoff: only overlay positions with options or a round lot
-    if not any(u.symbol != STOCK for u in us) and sum(abs(u.qty) for u in us) < 100:
-        return []
+            q = float(r["qty"])
+            lot_q = math.copysign(100 * (abs(q) // 100), q)       # odd-lot shares aren't part of a strategy
+            if lot_q:
+                f = lot_q / q
+                us.append(Unit(STOCK, lot_q, float(r["cost_basis"]) * f,
+                               (float(r["market_value"]) if r["market_value"] == r["market_value"] else 0.0) * f))
     return us
 
 

@@ -10,8 +10,12 @@ extended hours and overnight. To estimate what a contract should be worth at the
    (one-sided, very wide, or outside no-arbitrage bounds) fall back to Alpaca's IV, then to the
    average IV on the underlying.
 3. **Re-price** - Black-Scholes at the new underlying price, with time measured to the valuation time
-   (the next open when the market is closed, so weekend decay is included). Sticky strike: each
-   strike keeps its own IV unless an IV change is applied.
+   (the next open when the market is closed). Sticky strike: each strike keeps its own IV unless an
+   IV change is applied.
+
+Time is counted in **trading days** (252 a year): only weekdays that aren't NYSE holidays accrue time,
+24 hours each, so a weekend or holiday causes no decay. Friday close to Monday open is ~0.73 trading
+days, not 2.73 calendar days.
 
 European pricing with r = 4% and no dividends: fine for short-dated equity options, slightly
 underprices deep-ITM American puts and calls ahead of dividends.
@@ -27,7 +31,7 @@ from .occ import parse_occ
 from .optionsmath import bs_price
 
 R = 0.04
-YEAR_S = 365.0 * 86400
+TRADING_DAYS = 252.0
 STALE_MOVE = 0.02          # flag when the underlying moved this much since the option quotes
 WIDE = 1.0                 # (ask - bid) / mid above this: the mid says little about value
 
@@ -60,8 +64,74 @@ def expiry_time(d: date) -> datetime:
     return datetime.combine(d, time(16, 0), NY)
 
 
+# --------------------------------------------------------------------------- trading calendar
+def _easter(y: int) -> date:   # anonymous Gregorian algorithm
+    a, b, c = y % 19, y // 100, y % 100
+    d, e = b // 4, b % 4
+    g = (8 * b + 13) // 25
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l_ = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l_) // 451
+    month = (h + l_ - 7 * m + 114) // 31
+    return date(y, month, (h + l_ - 7 * m + 114) % 31 + 1)
+
+
+def _nth_weekday(y: int, month: int, weekday: int, n: int) -> date:
+    d = date(y, month, 1)
+    d += timedelta(days=(weekday - d.weekday()) % 7)
+    return d + timedelta(weeks=n - 1)
+
+
+def _last_weekday(y: int, month: int, weekday: int) -> date:
+    d = date(y + (month == 12), month % 12 + 1, 1) - timedelta(days=1)
+    return d - timedelta(days=(d.weekday() - weekday) % 7)
+
+
+def _observed(d: date) -> date:
+    return d - timedelta(days=1) if d.weekday() == 5 else d + timedelta(days=1) if d.weekday() == 6 else d
+
+
+_HOLIDAYS: dict[int, set] = {}
+
+
+def nyse_holidays(y: int) -> set:
+    """Full-day NYSE closures by rule (early closes are treated as full days)."""
+    if y not in _HOLIDAYS:
+        hs = {_nth_weekday(y, 1, 0, 3), _nth_weekday(y, 2, 0, 3), _easter(y) - timedelta(days=2),
+              _last_weekday(y, 5, 0), _observed(date(y, 7, 4)), _nth_weekday(y, 9, 0, 1),
+              _nth_weekday(y, 11, 3, 4), _observed(date(y, 12, 25))}
+        ny = date(y, 1, 1)
+        if ny.weekday() != 5:          # NYSE doesn't move New Year's back into the prior year
+            hs.add(_observed(ny))
+        if y >= 2022:
+            hs.add(_observed(date(y, 6, 19)))
+        _HOLIDAYS[y] = hs
+    return _HOLIDAYS[y]
+
+
+def is_trading_day(d: date) -> bool:
+    return d.weekday() < 5 and d not in nyse_holidays(d.year)
+
+
+def trading_days(t0: datetime, t1: datetime) -> float:
+    """Trading days between two instants: each weekday that isn't a holiday counts its 24 hours."""
+    if t1 <= t0:
+        return 0.0
+    a, b = t0.astimezone(NY), t1.astimezone(NY)
+    total, d = 0.0, a.date()
+    while d <= b.date():
+        if is_trading_day(d):
+            start = max(a, datetime.combine(d, time(0), NY))
+            end = min(b, datetime.combine(d + timedelta(days=1), time(0), NY))
+            total += max((end - start).total_seconds(), 0.0) / 86400
+        d += timedelta(days=1)
+    return total
+
+
 def years(t0: datetime, expiry: date) -> float:
-    return max((expiry_time(expiry) - t0).total_seconds(), 60.0) / YEAR_S
+    """Time to expiry (16:00 ET) in trading years; never below one minute of trading time."""
+    return max(trading_days(t0, expiry_time(expiry)), 60 / 86400) / TRADING_DAYS
 
 
 def bs(S: float, K: float, T: float, iv: float, right: str) -> float:
@@ -122,7 +192,7 @@ def _next_open(now: datetime) -> datetime:
     cand = datetime.combine(d.date(), time(9, 30), NY)
     if d >= cand:
         cand += timedelta(days=1)
-    while cand.weekday() >= 5:
+    while not is_trading_day(cand.date()):
         cand += timedelta(days=1)
     return cand
 

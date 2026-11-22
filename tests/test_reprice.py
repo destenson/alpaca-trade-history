@@ -101,3 +101,16 @@ def test_order_estimate_and_report_inputs():
     out = Report(a).to_html()
     assert 'id="rp-data"' in out and 'class="rp-spot"' in out and "Est. at open" in out
     assert "Moved since quotes" in out
+
+
+def test_trading_day_clock_skips_weekends_and_holidays():
+    from alpaca_analyzer.ledger import NY
+    fri_close = datetime(2026, 11, 20, 16, 0, tzinfo=NY)
+    mon_open = datetime(2026, 11, 23, 9, 30, tzinfo=NY)
+    assert RP.trading_days(fri_close, mon_open) == pytest.approx(8 / 24 + 9.5 / 24)
+    # Thanksgiving (Thu 11/26) accrues nothing: Mon open -> Fri 11/27 16:00 = 14.5h + Tue + Wed + 16h
+    assert RP.trading_days(mon_open, RP.expiry_time(date(2026, 11, 27))) == pytest.approx(14.5 / 24 + 2 + 16 / 24)
+    assert date(2026, 4, 3) in RP.nyse_holidays(2026)        # Good Friday
+    assert date(2027, 6, 18) in RP.nyse_holidays(2027)       # Juneteenth on a Saturday -> Friday
+    assert date(2027, 12, 31) not in RP.nyse_holidays(2027)  # New Year 2028 is a Saturday: no make-up day
+    assert RP._next_open(datetime(2026, 11, 25, 17, 0, tzinfo=NY)).date() == date(2026, 11, 27)

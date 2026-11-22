@@ -77,8 +77,7 @@ class Reading:
 
     @property
     def label(self) -> str:
-        names = [g.strategy for g in self.groups if g.strategy != "Odd-lot shares"]
-        return " + ".join(names)
+        return " + ".join(g.strategy for g in self.groups)
 
     @property
     def undefined(self) -> int:
@@ -86,8 +85,8 @@ class Reading:
 
     @property
     def sum_max_loss(self) -> float:
-        """Sum of each strategy group's own worst case (odd-lot shares are the same in every reading)."""
-        return sum(g.max_loss for g in self.groups if g.strategy != "Odd-lot shares")
+        """Sum of each strategy group's own worst case."""
+        return sum(g.max_loss for g in self.groups)
 
 
 def _leg_sort(sym: str):
@@ -158,8 +157,8 @@ def _evaluate(units: list[Unit], strategy: str, spot: float, today: date, xs: np
                  shown["x"], shown["expiry"], shown["today"])
 
 
-def readings(units: list[Unit], spot: float, today: date, opened: list[list[str]] | None = None,
-             odd_lot: Unit | None = None) -> tuple[list[Reading], dict]:
+def readings(units: list[Unit], spot: float, today: date, opened: list[list[str]] | None = None
+             ) -> tuple[list[Reading], dict]:
     """All partitions of ``units`` into recognised strategies.
 
     ``units`` hold one contract (or 100 shares) each where possible so that a 2-lot leg can serve two
@@ -170,7 +169,7 @@ def readings(units: list[Unit], spot: float, today: date, opened: list[list[str]
     lo, hi = min(strikes + [spot]) * 0.85, max(strikes + [spot]) * 1.15
     xs = np.linspace(lo, hi, 241)
     risk_xs = np.linspace(0.01, max(strikes + [spot]) * 3, 1201)
-    whole = _evaluate(units + ([odd_lot] if odd_lot else []), "Whole position", spot, today, xs, risk_xs)
+    whole = _evaluate(units, "Whole position", spot, today, xs, risk_xs)
 
     def key(group_units):  # identical contracts are interchangeable
         return tuple(sorted(Counter((u.symbol, 1 if u.qty > 0 else -1) for u in group_units).items()))
@@ -211,8 +210,6 @@ def readings(units: list[Unit], spot: float, today: date, opened: list[list[str]
     for canon, groups, names in out:
         gs = [_evaluate(g, n, spot, today, xs, risk_xs) for g, n in zip(groups, names)]
         gs.sort(key=lambda g: min(_leg_sort(u.symbol) for u in g.units))
-        if odd_lot:
-            gs.append(_evaluate([odd_lot], "Odd-lot shares", spot, today, xs, risk_xs))
         rs.append(Reading(gs, as_opened=(canon == opened_canon)))
     rs.sort(key=lambda r: (not r.as_opened, r.undefined, len(r.groups), r.label))
     whole_d = {"x": whole.curve_x, "expiry": whole.curve_expiry, "today": whole.curve_today,
@@ -224,7 +221,7 @@ def readings(units: list[Unit], spot: float, today: date, opened: list[list[str]
 def build_units(option_rows: list[dict], shares: float, share_cost: float, share_value: float,
                 snapshots: dict) -> tuple[list[Unit], Unit | None, bool]:
     """Split positions into units of 1 contract / 100 shares when that keeps the count small."""
-    total = sum(abs(r["qty"]) for r in option_rows) + int(shares // 100)
+    total = sum(abs(r["qty"]) for r in option_rows) + int(abs(shares) // 100)
     split = total <= MAX_UNITS
     units: list[Unit] = []
     for r in option_rows:
@@ -238,11 +235,19 @@ def build_units(option_rows: list[dict], shares: float, share_cost: float, share
                               {"delta": g.get("delta", 0) * mult, "theta": g.get("theta", 0) * mult,
                                "vega": g.get("vega", 0) * mult} if g else {},
                               snap.get("impliedVolatility")))
-    lots = int(shares // 100) if split else 0
+    # Only round lots (100 shares) take part in strategies; the odd remainder is returned separately so
+    # callers can mention it, but it is never grouped or included in the position's payoff.
+    sign = 1.0 if shares >= 0 else -1.0
+    lots = int(abs(shares) // 100)
     per_share_cost = share_cost / shares if shares else 0.0
     per_share_val = share_value / shares if shares else 0.0
-    for _ in range(lots):
-        units.append(Unit(STOCK, 100, 100 * per_share_cost, 100 * per_share_val, {"delta": 100.0}))
-    rest = shares - 100 * lots
-    odd = Unit(STOCK, rest, rest * per_share_cost, rest * per_share_val, {"delta": rest}) if rest > 1e-9 else None
+    if split:
+        for _ in range(lots):
+            q = 100 * sign
+            units.append(Unit(STOCK, q, q * per_share_cost, q * per_share_val, {"delta": q}))
+    elif lots:
+        q = 100 * lots * sign
+        units.append(Unit(STOCK, q, q * per_share_cost, q * per_share_val, {"delta": q}))
+    rest = shares - 100 * lots * sign
+    odd = Unit(STOCK, rest, rest * per_share_cost, rest * per_share_val, {"delta": rest}) if abs(rest) > 1e-9 else None
     return units, odd, split
