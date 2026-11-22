@@ -19,7 +19,7 @@ def build_reports(bundle_json: str, options_json: str = "{}") -> str:
     b = Bundle(activities=d.get("activities") or [], portfolio_history=d.get("portfolio_history"),
                positions=d.get("positions") or [], account=d.get("account"), bars=d.get("bars") or {},
                prices={k: float(v) for k, v in (d.get("prices") or {}).items()},
-               option_snapshots=d.get("option_snapshots") or {})
+               option_snapshots=d.get("option_snapshots") or {}, orders=d.get("orders") or [])
     if not b.activities:
         raise ValueError("This account has no activity yet - nothing to analyze.")
     a = analysis.run(b, benchmarks=opts.get("benchmarks") or ["SPY", "QQQ"],

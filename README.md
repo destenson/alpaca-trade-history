@@ -15,6 +15,7 @@ Try it now [in your browser](https://destenson.github.io/alpaca-trade-history/)
 | **Drawdown** | Underwater curve vs. benchmarks · dollar drawdown · worst drawdown episodes |
 | **Trades** | Cumulative realized P&L (stocks/options) · P&L distribution · holding period vs. P&L · P&L by underlying · **your trading vs. just holding the underlying** · P&L by entry weekday and hour · trade timeline · sortable table of every closed lot |
 | **Options** | P&L and win rate by strategy · cumulative P&L by strategy · P&L by DTE at entry and by time in trade · calls vs. puts, debit vs. credit · how positions ended (closed, expired, assigned, exercised) · P&L by underlying · return-on-risk distribution · moneyness at entry · **roll chains** · **payoff diagrams for open positions** (at expiration + today via Black-Scholes at snapshot IV, including shares held) · position Greeks · strategy table |
+| **Orders** | Unfilled option strategy orders projected **at your limit price**: risk/reward bars with IV-implied probability of profit for every order · table with mid, natural, edge vs mid, max profit/loss, reward/risk, breakevens · payoff explorer per order and for all orders on one underlying, overlaid on what you already hold there. Closing and stock orders (take-profits) are counted, not projected. Never in the `--share` view. |
 | **Positions** | Unrealized P&L by position · concentration · holdings table |
 | **Method & data checks** | Ledger vs. broker position reconciliation, fee treatment, warnings |
 
@@ -124,7 +125,7 @@ The first visit downloads ~20 MB of Python/pandas, which the browser then caches
 
 A bundle directory holds `activities.json` (raw Alpaca activities) and/or `activities.csv`,
 `portfolio_history.json`, `positions.json`, `account.json`, `bars.json` (`{symbol: [{t, c}]}`),
-and optionally `prices.json` and `option_snapshots.json`. The CSV form is handy for hand-built or
+and optionally `prices.json`, `option_snapshots.json` and `orders.json` (raw `/v2/orders?status=open&nested=true`). The CSV form is handy for hand-built or
 exported histories:
 
 ```csv

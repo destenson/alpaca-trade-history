@@ -67,6 +67,11 @@ class AlpacaClient:
     def positions(self) -> list[dict]:
         return self._get(f"{self.base_url}/v2/positions")
 
+    def open_orders(self) -> list[dict]:
+        """Unfilled orders, multi-leg legs nested under their parent."""
+        return self._get(f"{self.base_url}/v2/orders",
+                         {"status": "open", "nested": "true", "limit": 500, "direction": "desc"}) or []
+
     def activities(self, after: str | None = None, until: str | None = None,
                    activity_types: Iterable[str] | None = None, page_size: int = 100) -> list[dict]:
         """All account activities (fills and non-trade), oldest first, following pagination."""
@@ -182,7 +187,11 @@ class AlpacaClient:
             for sym, snap in (resp or {}).items():
                 if not snap:
                     continue
-                px = (snap.get("latestTrade") or {}).get("p") or (snap.get("dailyBar") or {}).get("c")
+                tr = snap.get("latestTrade") or {}
+                # extended-hours prints (condition T/U) can sit far from the session close on thin books
+                ext = bool({"T", "U"} & set(tr.get("c") or []))
+                px = ((snap.get("dailyBar") or {}).get("c") if ext else None) or tr.get("p") \
+                    or (snap.get("dailyBar") or {}).get("c")
                 if px:
                     out[sym] = float(px)
         return out

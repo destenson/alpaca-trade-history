@@ -157,6 +157,7 @@ class Alpaca {
 
   account() { return this.get(`${this.base}/v2/account`); }
   positions() { return this.get(`${this.base}/v2/positions`); }
+  openOrders() { return this.get(`${this.base}/v2/orders?status=open&nested=true&limit=500&direction=desc`); }
 
   async activities() {
     const out = [];
@@ -255,7 +256,9 @@ class Alpaca {
         catch (_) { continue; }
       }
       for (const [s, snap] of Object.entries(r || {})) {
-        const px = snap?.latestTrade?.p ?? snap?.dailyBar?.c;
+        // extended-hours prints (condition T/U) can sit far from the session close on thin books
+        const ext = (snap?.latestTrade?.c || []).some((c) => c === 'T' || c === 'U');
+        const px = (ext ? snap?.dailyBar?.c : null) ?? snap?.latestTrade?.p ?? snap?.dailyBar?.c;
         if (px) out[s] = px;
       }
     }
@@ -300,15 +303,25 @@ async function fetchBundle(creds, benchmarks) {
   step(`Downloading daily prices for ${syms.length} symbols…`);
   const barStart = new Date(new Date(first).getTime() - 7 * 864e5).toISOString().slice(0, 10) + 'T00:00:00Z';
   const bars = await api.dailyBars(syms, barStart);
-  const openOpts = positions.filter((p) => p.asset_class === 'us_option').map((p) => p.symbol);
+  step('Downloading open orders…');
+  const orders = await api.openOrders();
+  // option contracts in open orders (multi-leg legs are nested under their parent)
+  const orderOpts = new Set();
+  for (const o of orders) {
+    for (const sym of [o.symbol, ...(o.legs || []).map((l) => l.symbol)]) {
+      if (sym && OCC.test(sym)) orderOpts.add(sym);
+    }
+  }
+  const orderUnds = [...orderOpts].map((s) => OCC.exec(s)[1]);
+  const openOpts = [...new Set([...positions.filter((p) => p.asset_class === 'us_option').map((p) => p.symbol), ...orderOpts])];
   let option_snapshots = {};
   if (openOpts.length) {
-    step(`Loading Greeks for ${openOpts.length} open option contracts…`);
+    step(`Loading quotes and Greeks for ${openOpts.length} option contracts (positions + open orders)…`);
     option_snapshots = await api.optionSnapshots(openOpts);
   }
-  const missing = unds.filter((s) => !bars[s]);
+  const missing = [...new Set([...unds.filter((s) => !bars[s]), ...orderUnds])];
   const prices = missing.length ? await api.latestPrices(missing) : {};
-  return { account, activities, portfolio_history, positions, bars, option_snapshots, prices };
+  return { account, activities, portfolio_history, positions, bars, option_snapshots, prices, orders };
 }
 
 // --------------------------------------------------------------------------- Python

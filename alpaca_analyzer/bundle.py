@@ -9,7 +9,8 @@ Layout of a bundle directory::
     account.json            raw /v2/account
     bars.json               {symbol: [{"t": iso, "c": close}, ...]}  daily, adjusted
     prices.json             {symbol: last_price}  optional extra marks
-    option_snapshots.json   {occ_symbol: snapshot}  optional (greeks / IV for open options)
+    option_snapshots.json   {occ_symbol: snapshot}  optional (greeks / IV / quotes for open options and order legs)
+    orders.json             raw /v2/orders?status=open&nested=true  optional (projections for unfilled orders)
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ class Bundle:
     bars: dict[str, list[dict]] = field(default_factory=dict)
     prices: dict[str, float] = field(default_factory=dict)
     option_snapshots: dict[str, dict] = field(default_factory=dict)
+    orders: list[dict] = field(default_factory=list)
 
     # ---------------------------------------------------------------- io
     @classmethod
@@ -53,6 +55,7 @@ class Bundle:
         b.bars = j("bars.json", {})
         b.prices = {k: float(v) for k, v in j("prices.json", {}).items()}
         b.option_snapshots = j("option_snapshots.json", {})
+        b.orders = j("orders.json", [])
         if not b.activities:
             raise FileNotFoundError(f"No activities found in {p} (expected activities.json or activities.csv)")
         return b
@@ -71,6 +74,8 @@ class Bundle:
             (p / "prices.json").write_text(json.dumps(self.prices, indent=1))
         if self.option_snapshots:
             (p / "option_snapshots.json").write_text(json.dumps(self.option_snapshots))
+        if self.orders:
+            (p / "orders.json").write_text(json.dumps(self.orders, indent=1))
 
 
 def read_activities_csv(path: Path) -> list[dict]:
@@ -146,14 +151,27 @@ def fetch_bundle(client, start: str | None = None, benchmarks: list[str] | None 
     bar_start = (date.fromisoformat(first) - timedelta(days=7)).isoformat()
     log(f"Fetching daily bars for {len(syms)} symbols ...")
     b.bars = client.daily_bars(syms, start=f"{bar_start}T00:00:00Z", feed=feed)
-    open_opts = [p["symbol"] for p in b.positions if p.get("asset_class") == "us_option"]
+    log("Fetching open orders ...")
+    b.orders = client.open_orders()
+    o_opts, o_unds = order_symbols(b.orders)
+    open_opts = sorted({p["symbol"] for p in b.positions if p.get("asset_class") == "us_option"} | o_opts)
     if open_opts:
-        log(f"Fetching snapshots for {len(open_opts)} open option contracts ...")
+        log(f"Fetching snapshots for {len(open_opts)} option contracts (open positions + order legs) ...")
         b.option_snapshots = client.option_snapshots(open_opts)
-    held_or_traded = sorted(unds - set(b.bars))
-    if held_or_traded:
-        b.prices = client.latest_prices([s for s in held_or_traded if s.isalpha()])
+    need = sorted((unds - set(b.bars)) | o_unds)
+    if need:
+        b.prices = client.latest_prices([s for s in need if s.isalpha() or "." in s])
     return b
+
+
+def order_symbols(orders: list[dict]) -> tuple[set[str], set[str]]:
+    """(option contracts, underlyings) of open option orders - what their projections need priced."""
+    opts: set[str] = set()
+    for o in orders or []:
+        for sym in [o.get("symbol")] + [l.get("symbol") for l in o.get("legs") or []]:
+            if sym and parse_occ(sym):
+                opts.add(sym)
+    return opts, {underlying_of(s) for s in opts}
 
 
 def _last_activity_date(acts: list[dict]) -> str | None:
