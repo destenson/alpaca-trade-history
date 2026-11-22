@@ -80,6 +80,16 @@ td.pos { color: var(--gain-text); } td.neg { color: var(--loss-text); }
 .pick select { font: inherit; font-size: 13px; color: var(--ink); background: var(--page); border: 1px solid var(--axis);
   border-radius: 8px; padding: 6px 8px; max-width: 100%; flex: 1 1 auto; }
 .interp-view .tablewrap { max-height: none; margin-bottom: 8px; }
+.rp-table td, .rp-table th { white-space: nowrap; }
+.rp-table tr.stale td { background: color-mix(in srgb, var(--series-1) 10%, transparent); }
+.rp-table tr.stale td.rp-move { font-weight: 600; }
+.rp-table input { font: inherit; font-size: 13px; width: 6.5em; padding: 3px 6px; color: var(--ink); background: var(--page);
+  border: 1px solid var(--axis); border-radius: 6px; }
+.rp-table input.rp-iv { width: 4.5em; }
+.rp-table input:invalid { border-color: var(--loss); }
+.rp-table button { font: inherit; font-size: 12px; color: var(--ink-2); background: transparent; border: 1px solid var(--axis);
+  border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+.rp-table tr.edited td:first-child::after { content: " · edited"; color: var(--muted); font-weight: 400; font-size: 11px; }
 .alert { grid-column: 1 / -1; border: 1px solid var(--loss); border-left-width: 4px; border-radius: 10px;
   background: color-mix(in srgb, var(--loss) 8%, var(--surface)); padding: 10px 16px; }
 .alert ul { margin: 4px 0 0; padding-left: 18px; color: var(--ink-2); }
@@ -178,6 +188,104 @@ document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('
   box.querySelectorAll(':scope > .interp-view').forEach(v => { v.hidden = v.id !== sel.value; });
   box.querySelectorAll('#' + sel.value + ' .plot').forEach(el => draw(el.id));
 }));
+// Re-pricing of open orders (Orders tab): Black-Scholes in the page so edited prices / IV changes
+// update the estimates, table cells and charts for that underlying. Mirrors alpaca_analyzer.reprice.
+(function () {
+  const holder = document.getElementById('rp-data');
+  if (!holder) return;
+  const RP = JSON.parse(holder.textContent);
+  const R = RP.r;
+  function erf(x) {  // Abramowitz-Stegun 7.1.26, |error| < 1.5e-7
+    const s = Math.sign(x); x = Math.abs(x);
+    const t = 1 / (1 + 0.3275911 * x);
+    return s * (1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x));
+  }
+  const N = (x) => 0.5 * (1 + erf(x / Math.SQRT2));
+  function bs(S, K, T, iv, call) {
+    if (T <= 0 || iv <= 0) return call ? Math.max(S - K, 0) : Math.max(K - S, 0);
+    const v = iv * Math.sqrt(T), d1 = (Math.log(S / K) + (R + 0.5 * iv * iv) * T) / v, d2 = d1 - v, df = Math.exp(-R * T);
+    return call ? S * N(d1) - K * df * N(d2) : K * df * N(-d2) - S * N(-d1);
+  }
+  // P&L of a leg set at underlying S (legs: [strike, is_call, qty x100, T, iv])
+  function pnl(m, S, shift) {
+    let y = -m.cost + m.shares * S;
+    for (const [K, c, q, T, iv] of m.legs) y += q * bs(S, K, T, Math.max(iv * (1 + shift), 1e-3), c === 1);
+    return y;
+  }
+  const r2 = (v) => Math.round(v * 100) / 100;
+  const fmt = (v) => '$' + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const px = (v) => fmt(v) + (v > 0 ? ' debit' : v < 0 ? ' credit' : ' even');
+  const signed = (v) => (v < 0 ? '−' : v > 0 ? '+' : '') + fmt(v);
+  function fillText(est, net) {
+    const e = est - net;
+    return e <= 0.005 ? 'at or through your limit: likely to fill near the open'
+      : `your limit is ${fmt(e)} better than the estimate: fills only if prices move your way`;
+  }
+  const table = document.getElementById('t_orders');
+  const col = (name) => table ? [...table.tHead.rows[0].cells].findIndex((c) => c.textContent === name) : -1;
+  const cEst = col(RP.est_col), cEdge = col('Edge vs est.'), cSpot = col('Spot');
+  function setCell(k, ci, text, v, pn) {
+    if (!table || ci < 0) return;
+    const row = [...table.tBodies[0].rows].find((r) => r.cells[0].dataset.v === String(k));
+    if (!row) return;
+    const td = row.cells[ci];
+    td.textContent = text; td.dataset.v = String(v);
+    if (pn) { td.classList.toggle('pos', v > 0); td.classList.toggle('neg', v < 0); }
+  }
+  function update(tr) {
+    const und = tr.dataset.und;
+    const sIn = tr.querySelector('.rp-spot'), vIn = tr.querySelector('.rp-iv');
+    const S = parseFloat(sIn.value), shift = (parseFloat(vIn.value) || 0) / 100;
+    if (!(S > 0) || !(shift > -0.95)) return;
+    const ref = parseFloat(sIn.dataset.ref);
+    const mv = tr.querySelector('.rp-move');
+    const move = S / ref - 1;
+    mv.textContent = (move < 0 ? '−' : move > 0 ? '+' : '') + Math.abs(move * 100).toFixed(1) + '%';
+    tr.classList.toggle('stale', Math.abs(move) >= 0.02);
+    tr.classList.toggle('edited', sIn.value !== sIn.dataset.default || (parseFloat(vIn.value) || 0) !== 0);
+    for (const v of RP.views) {
+      if (v.und !== und) continue;
+      const spec = FIGS[v.fid];
+      spec.data[v.t_open].y = v.x.map((x) => r2(pnl(v.order, x, shift)));
+      if (v.t_comb !== null && v.pos) spec.data[v.t_comb].y = v.x.map((x) => r2(pnl(v.order, x, shift) + pnl(v.pos, x, shift)));
+      const at = pnl(v.order, S, shift);
+      if (v.t_mark !== null) { spec.data[v.t_mark].x = [S]; spec.data[v.t_mark].y = [r2(at)]; }
+      spec.layout.shapes[0].x0 = spec.layout.shapes[0].x1 = S;
+      spec.layout.annotations[0].x = S;
+      spec.layout.annotations[0].text = (Math.abs(move) >= 0.02 ? 'estimate at $' : 'spot $') + S.toFixed(2);
+      const estTotal = at + v.order.cost;            // model value of the legs, $ (+ debit)
+      const el = document.getElementById(v.est);
+      if (el) {
+        const head = `Estimated value at ${RP.when}: `;
+        el.innerHTML = '';
+        el.append(head);
+        const b = document.createElement('b');
+        if (v.um) {
+          b.textContent = px(estTotal / v.um);
+          el.append(b, ` vs your limit ${px(v.net / v.um)} · ${fillText(estTotal / v.um, v.net / v.um)}`);
+        } else {
+          b.textContent = px(estTotal);
+          el.append(b, ` vs ${px(v.net)} at your limits`);
+        }
+      }
+      for (const k of v.rows) {
+        setCell(k, cEst, px(estTotal / v.um), estTotal / v.um, false);
+        const edge = estTotal - v.net;
+        setCell(k, cEdge, signed(edge), edge, true);
+        setCell(k, cSpot, fmt(S), S, false);
+      }
+      const plot = document.getElementById(v.fid);
+      if (plot && plot.offsetParent !== null) draw(v.fid);
+    }
+  }
+  document.querySelectorAll('.rp-table tbody tr').forEach((tr) => {
+    tr.querySelectorAll('input').forEach((i) => i.addEventListener('input', () => update(tr)));
+    tr.querySelector('.rp-reset').addEventListener('click', () => {
+      const sIn = tr.querySelector('.rp-spot');
+      sIn.value = sIn.dataset.default; tr.querySelector('.rp-iv').value = '0'; update(tr);
+    });
+  });
+})();
 // sortable tables
 document.querySelectorAll('table.sortable').forEach(t => {
   t.querySelectorAll('th').forEach((th, i) => th.addEventListener('click', () => {

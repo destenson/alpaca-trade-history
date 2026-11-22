@@ -24,7 +24,8 @@ import numpy as np
 from .interpret import STOCK, Unit, _evaluate, name_group
 from .ledger import NY, Ledger, classify, Combo
 from .occ import parse_occ, underlying_of
-from .optionsmath import payoff_curves
+from .optionsmath import bs_price, payoff_curves
+from . import reprice as RP
 
 DONE = {"filled", "canceled", "expired", "replaced", "rejected", "stopped", "suspended", "done_for_day",
         "pending_cancel"}
@@ -47,6 +48,7 @@ class OrderLeg:
     ask: float | None = None
     iv: float | None = None
     greeks: dict = field(default_factory=dict)
+    model: "RP.LegModel | None" = None
 
     @property
     def is_option(self) -> bool:
@@ -86,6 +88,8 @@ class PendingOrder:
     pop: float | None = None
     expiry: date | None = None
     curves: dict = field(default_factory=dict)
+    est_open: float | None = None    # model value per unit at the valuation time and spot (+ debit)
+    model: dict = field(default_factory=dict)   # inputs for in-page re-pricing
 
     @property
     def mult(self) -> float:
@@ -230,9 +234,46 @@ def _name(units: list[Unit]) -> str:
     return classify(Combo(0, "", datetime.now(NY), legs=legs, stock_held_at_open=0.0))
 
 
+def _models_for(units: list[Unit], snapshots: dict, market, und: str, ivs: dict) -> dict:
+    out = {}
+    u_ = market.underlyings.get(und) if market else None
+    for u in units:
+        if u.symbol != STOCK and u.symbol not in out and u_ is not None:
+            out[u.symbol] = RP.calibrate(u.symbol, snapshots.get(u.symbol) or {}, u_, market, ivs.get(und))
+    return out
+
+
+def curve_open(units: list[Unit], models: dict, xs, iv_shift: float = 0.0) -> list[float]:
+    """P&L vs underlying price at the valuation time (next open), from calibrated leg models."""
+    xs = np.asarray(xs, dtype=float)
+    y = np.full(len(xs), -sum(u.cost for u in units))
+    for u in units:
+        if u.symbol == STOCK:
+            y += u.qty * xs
+        else:
+            m = models[u.symbol]
+            y += 100 * u.qty * bs_price(xs, m.strike, m.T, max(m.iv * (1 + iv_shift), 1e-3), m.right, r=RP.R)
+    return y.round(2).tolist()
+
+
+def model_payload(units: list[Unit], models: dict) -> dict:
+    """Compact leg list for the page's JavaScript re-pricer: [strike, is_call, qty x100, T years, iv]."""
+    legs, shares = [], 0.0
+    for u in units:
+        if u.symbol == STOCK:
+            shares += u.qty
+        else:
+            m = models[u.symbol]
+            legs.append([m.strike, 1 if m.right == "C" else 0, round(100 * u.qty, 6), round(m.T, 8), round(m.iv, 6)])
+    return {"legs": legs, "shares": shares, "cost": round(sum(u.cost for u in units), 4)}
+
+
 def evaluate(orders: list[PendingOrder], ledger: Ledger, open_positions, snapshots: dict, spot_of,
-             today: date | None = None) -> list[PendingOrder]:
+             today: date | None = None, market=None) -> list[PendingOrder]:
+    """``market`` (reprice.Market): when given, spots are the latest prints and the "today" curve is
+    the estimated value at the next open from calibrated leg IVs."""
     today = today or datetime.now(NY).date()
+    und_ivs = RP.underlying_ivs(snapshots)
     for po in orders:
         for l in po.legs:
             snap = snapshots.get(l.symbol) or {}
@@ -246,7 +287,8 @@ def evaluate(orders: list[PendingOrder], ledger: Ledger, open_positions, snapsho
             m = l.ratio * po.units * (100 if l.is_option else 1)
             l.greeks = ({k: (_f(g.get(k)) or 0.0) * m for k in ("delta", "theta", "vega")} if g else
                         ({"delta": m} if not l.is_option else {}))
-        po.spot = spot_of(po.underlying)
+        mu = market.underlyings.get(po.underlying) if market else None
+        po.spot = (mu.spot if mu and mu.spot else None) or spot_of(po.underlying)
         mids = [l.mid for l in po.legs]
         if all(m is not None for m in mids):
             po.mid_now = sum(l.ratio * m for l, m in zip(po.legs, mids))
@@ -287,9 +329,19 @@ def evaluate(orders: list[PendingOrder], ledger: Ledger, open_positions, snapsho
             ivs = [iv for iv, c in near if c.expiry == po.expiry] or [iv for iv, _ in near]
         po.pop = _pop(legs, po.spot, 0.0, 0.0, today, po.expiry, float(np.mean(ivs)) if ivs else None)
         po.curves = {"x": g.curve_x, "expiry": g.curve_expiry, "today": g.curve_today}
+        if market is not None and po.underlying in market.underlyings:
+            models = _models_for(allu, snapshots, market, po.underlying, und_ivs)
+            for l in po.legs:
+                l.model = models.get(l.symbol)
+            po.curves["today"] = curve_open(units, models, g.curve_x)
+            po.est_open = sum(l.ratio * l.model.value(po.spot) for l in po.legs if l.model)
+            po.model = {"order": model_payload(units, models),
+                        "pos": model_payload(pos, models) if pos else None}
         if pos:
             cur = _evaluate(pos, "Position", po.spot, today, xs, risk_xs)
             comb = _evaluate(allu, "Position + order", po.spot, today, xs, risk_xs)
+            if po.model:
+                comb.curve_today = curve_open(allu, models, g.curve_x)
             po.curves.update(position=cur.curve_expiry, combined=comb.curve_expiry,
                              combined_today=comb.curve_today,
                              pos_max_loss=cur.max_loss, pos_max_gain=cur.max_gain,
@@ -298,7 +350,8 @@ def evaluate(orders: list[PendingOrder], ledger: Ledger, open_positions, snapsho
     return orders
 
 
-def combine(orders: list[PendingOrder], open_positions, snapshots: dict, today: date | None = None) -> dict | None:
+def combine(orders: list[PendingOrder], open_positions, snapshots: dict, today: date | None = None,
+            market=None) -> dict | None:
     """Every order on one underlying filling together (plus the current position)."""
     today = today or datetime.now(NY).date()
     os_ = [o for o in orders if o.asset == "option" and o.net is not None and o.spot]
@@ -312,9 +365,17 @@ def combine(orders: list[PendingOrder], open_positions, snapshots: dict, today: 
     d = {"x": g.curve_x, "expiry": g.curve_expiry, "today": g.curve_today, "max_gain": g.max_gain,
          "max_loss": g.max_loss, "breakevens": g.breakevens, "net": sum(o.net * o.units * o.mult for o in os_),
          "spot": spot, "n": len(os_)}
+    models = None
+    if market is not None and os_[0].underlying in market.underlyings:
+        models = _models_for(units + pos, snapshots, market, os_[0].underlying, RP.underlying_ivs(snapshots))
+        d["today"] = curve_open(units, models, g.curve_x)
+        d["est_open"] = sum(o.est_open * o.units * o.mult for o in os_ if o.est_open is not None)  # total $
+        d["model"] = {"order": model_payload(units, models), "pos": model_payload(pos, models) if pos else None}
     if pos:
         cur = _evaluate(pos, "Position", spot, today, xs, risk_xs)
         comb = _evaluate(units + pos, "Position + orders", spot, today, xs, risk_xs)
+        if models:
+            comb.curve_today = curve_open(units + pos, models, g.curve_x)
         d.update(position=cur.curve_expiry, combined=comb.curve_expiry, combined_today=comb.curve_today,
                  comb_max_loss=comb.max_loss, comb_max_gain=comb.max_gain, comb_breakevens=comb.breakevens)
     return d

@@ -67,6 +67,9 @@ class AlpacaClient:
     def positions(self) -> list[dict]:
         return self._get(f"{self.base_url}/v2/positions")
 
+    def clock(self) -> dict:
+        return self._get(f"{self.base_url}/v2/clock")
+
     def open_orders(self) -> list[dict]:
         """Unfilled orders, multi-leg legs nested under their parent."""
         return self._get(f"{self.base_url}/v2/orders",
@@ -175,6 +178,20 @@ class AlpacaClient:
             except AlpacaError:
                 continue
             out.update(resp.get("snapshots") or {})
+        return out
+
+    def stock_snapshots(self, symbols: list[str], feed: str | None = None) -> dict[str, dict]:
+        """Raw stock snapshots (latest trade with time/size/conditions, daily bar)."""
+        out: dict[str, dict] = {}
+        for i in range(0, len(symbols), 100):
+            params = {"symbols": ",".join(symbols[i:i + 100])}
+            if feed:
+                params["feed"] = feed
+            try:
+                resp = self._get(f"{self.data_url}/v2/stocks/snapshots", params)
+            except AlpacaError:
+                continue
+            out.update({k: v for k, v in (resp or {}).items() if v})
         return out
 
     def latest_prices(self, symbols: list[str]) -> dict[str, float]:

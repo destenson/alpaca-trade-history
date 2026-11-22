@@ -19,6 +19,7 @@ from .ledger import NY
 from .occ import parse_occ
 from .interpret import build_units, readings
 from . import orders as O
+from . import reprice as RP
 from .optionsmath import payoff_curves
 
 PLOTLY_CDN = "https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"
@@ -807,7 +808,11 @@ class Report:
             return
         today = datetime.now(NY).date()
         spot = lambda und: _spot_from(a, und, None)  # noqa: E731
-        O.evaluate(allo, a.ledger, a.open_positions, a.bundle.option_snapshots, spot, today)
+        snaps = a.bundle.option_snapshots
+        unds = {o.underlying for o in allo if o.asset == "option"}
+        market = RP.market_state(a.bundle.clock, a.bundle.stock_snapshots, unds, RP.quote_times(snaps),
+                                 {u: spot(u) for u in unds})
+        O.evaluate(allo, a.ledger, a.open_positions, snaps, spot, today, market=market)
         opening = [o for o in allo if o.asset == "option" and o.effect != "close"]
         skipped_close = sum(o.asset == "option" and o.effect == "close" for o in allo)
         skipped_stock = sum(o.asset == "stock" for o in allo)
@@ -823,6 +828,8 @@ class Report:
             return
         opening.sort(key=lambda o: (o.expiry or date.max, o.underlying, (o.submitted.timestamp() if o.submitted else 0)))
         priced = [o for o in opening if o.curves]
+        val = market.valuation.astimezone(NY)
+        when = "now" if market.is_open else f"the next open ({val:%a %b} {val.day}, {_clock(val)} ET)"
 
         def px(v, est=False):
             if v is None or (isinstance(v, float) and math.isnan(v)):
@@ -837,6 +844,19 @@ class Report:
         def name(o):
             return f"{o.underlying} {o.strategy} {o.expiry:%m/%d}" if o.expiry else f"{o.underlying} {o.strategy}"
 
+        def edge_est(o):
+            if o.est_open is None or o.net is None or o.net_is_estimate:
+                return math.nan
+            return (o.est_open - o.net) * o.units * o.mult
+
+        def fill_text(est_unit, net):
+            if est_unit is None or net is None:
+                return ""
+            e = est_unit - net
+            if e <= 0.005:
+                return "at or through your limit: likely to fill near the open"
+            return f"your limit is ${e:,.2f} better than the estimate: fills only if prices move your way"
+
         # ---- tiles
         net = sum(o.net * o.units * o.mult for o in opening if o.net is not None)
         fin_loss = [o.max_loss for o in priced if not math.isinf(o.max_loss)]
@@ -844,7 +864,9 @@ class Report:
         n_unl = sum(math.isinf(o.max_loss) for o in priced)
         pops = [o.pop for o in priced if o.pop is not None]
         edge = [o.mid_now - o.net for o in opening if o.mid_now is not None and o.net is not None and not o.net_is_estimate]
+        ests = [edge_est(o) for o in opening if not math.isnan(edge_est(o))]
         nearest = min((o.expiry for o in opening if o.expiry), default=None)
+        stale = [u for u in market.underlyings.values() if u.stale and u.symbol in {o.underlying for o in opening}]
         tiles = [
             ("Open strategy orders", str(len(opening)),
              f"{len({o.underlying for o in opening})} underlyings"
@@ -855,11 +877,56 @@ class Report:
             ("Combined max profit", money(sum(fin_gain), dp=0) if fin_gain else "–",
              f"reward/risk {sum(fin_gain) / -sum(fin_loss):.2f}" if fin_loss and sum(fin_loss) else ""),
             ("Median prob. of profit", pct(float(np.median(pops)), dp=0) if pops else "–",
-             "at first expiry, from snapshot implied vol"),
+             "at first expiry, from implied vol"),
             ("Limits vs mid", f"{sum(e >= -0.005 for e in edge)}/{len(edge)}" if edge else "–",
-             "priced at or better than the current mid (less likely to fill)"),
+             "priced at or better than the quoted mid (less likely to fill)"),
+            ("Likely to fill", f"{sum(e <= 0.5 for e in ests)}/{len(ests)}" if ests else "–",
+             f"limit at or through the estimated value at {'current prices' if market.is_open else 'the open'}"),
         ]
+        if stale:
+            tiles.insert(1, ("Moved since quotes", str(len(stale)),
+                             ", ".join(f"{u.symbol} {u.move:+.1%}" for u in sorted(stale, key=lambda u: -abs(u.move)))))
         parts = [self.tiles(tiles)]
+
+        # ---- repricing inputs
+        rows_html = []
+        for und in sorted({o.underlying for o in priced}, key=lambda u: -abs(market.underlyings[u].move)
+                          if u in market.underlyings else 0):
+            u = market.underlyings.get(und)
+            if not u or not u.spot:
+                continue
+            lt = (f"${u.last:,.2f} · {u.last_size:,.0f} sh · {u.last_time.astimezone(NY):%a} {_clock(u.last_time.astimezone(NY))}"
+                  + (f" ({u.last_feed})" if u.last_feed not in ("", "primary") else "")
+                  + (" · after hours" if u.last_ext else "")) if u.last and u.last_time else "–"
+            qt = f"{u.quote_time.astimezone(NY):%a} {_clock(u.quote_time.astimezone(NY))}" if u.quote_time else "–"
+            rows_html.append(
+                f'<tr class="{"stale" if u.stale else ""}" data-und="{html.escape(und)}">'
+                f'<td><b>{html.escape(und)}</b></td><td>{money(u.ref)}</td><td>{lt}</td>'
+                f'<td class="rp-move">{pct(u.move, True)}</td><td>{qt}</td>'
+                f'<td><input class="rp-spot" type="number" inputmode="decimal" min="0" step="any" '
+                f'value="{round(u.spot, 4):g}" data-default="{round(u.spot, 4):g}" data-ref="{u.ref or u.spot:.6f}" '
+                f'aria-label="{html.escape(und)} price for estimates"></td>'
+                f'<td><input class="rp-iv" type="number" inputmode="decimal" step="5" min="-90" max="300" value="0" '
+                f'aria-label="{html.escape(und)} IV change in percent"> %</td>'
+                f'<td><button type="button" class="rp-reset">Reset</button></td></tr>')
+        if rows_html:
+            status = ("The market is open: option quotes are live, so the inputs are what-ifs." if market.is_open else
+                      f"The market is closed. Option quotes are from the last session; the underlying keeps trading "
+                      f"after hours and overnight. Estimates are for {when}.")
+            parts.append(
+                '<figure class="card wide"><h3>Re-pricing: underlying moves since the option quotes</h3>'
+                f'<p class="sub">{status} Rows with a move of {RP.STALE_MOVE:.0%} or more are highlighted. Edit a price '
+                'or apply an IV change (e.g. −30 for an earnings vol crush) and every estimate, table cell and chart '
+                'for that underlying updates.</p>'
+                '<div class="tablewrap"><table class="rp-table"><thead><tr><th>Underlying</th><th>Quotes reflect</th>'
+                '<th>Latest trade</th><th>Move</th><th>Options quoted</th><th>Price for estimates</th><th>IV change</th>'
+                '<th></th></tr></thead><tbody>' + "".join(rows_html) + '</tbody></table></div>'
+                '<p class="note">How the estimate works: each leg\'s implied vol is backed out of its own quoted mid at '
+                'the price the quotes reflect (one-sided or very wide quotes fall back to Alpaca\'s IV), then the leg is '
+                f're-priced with Black-Scholes at the new price and the time left at {when}, so weekend time decay '
+                'counts. Each strike keeps its own IV (sticky strike) unless you change it. Single after-hours prints can '
+                'be far from where the stock opens: check the size and time. European pricing, r = 4%, no dividends.'
+                '</p></figure>')
 
         # ---- risk / reward overview
         if priced:
@@ -887,7 +954,8 @@ class Report:
                 max(280, 34 * len(priced) + 120), wide=True, title="Risk and reward if each order fills",
                 subtitle="At your limit price, held to expiration, fees excluded. Undefined-risk sides are left "
                          "off the bars (see the table). Diamonds: chance the underlying finishes beyond breakeven, "
-                         "from the legs' implied vol (lognormal, no drift) — a market-implied estimate, not a forecast."))
+                         "from the legs' implied vol (lognormal, no drift, from the latest price) — a market-implied "
+                         "estimate, not a forecast."))
 
         # ---- table
         rows = []
@@ -895,26 +963,30 @@ class Report:
             rows.append({"#": k + 1, "Underlying": o.underlying, "Strategy": o.strategy, "Legs": o.legs_label,
                          "Expires": o.expiry.isoformat() if o.expiry else "–",
                          "DTE": (o.expiry - today).days if o.expiry else math.nan,
-                         "Limit": px(o.net, o.net_is_estimate), "Mid now": px(o.mid_now), "Natural": px(o.natural),
+                         "Limit": px(o.net, o.net_is_estimate), "Mid (quoted)": px(o.mid_now), "Natural": px(o.natural),
                          "Edge vs mid": (o.mid_now - o.net) * o.units * o.mult
                          if o.mid_now is not None and o.net is not None and not o.net_is_estimate else math.nan,
+                         "Est. at open" if not market.is_open else "Est. now": px(o.est_open),
+                         "Edge vs est.": edge_est(o),
                          "Max profit": o.max_gain, "Max loss": o.max_loss, "Reward/risk": rr(o),
                          "Breakevens": ", ".join(f"${b:,.2f}" for b in o.breakevens) or "–",
                          "Prob. profit": math.nan if o.pop is None else o.pop,
                          "Spot": o.spot if o.spot else math.nan, "TIF": o.tif.upper(),
                          "Placed": _iso(o.submitted) if o.submitted else "–"})
         parts.append('<figure class="card wide"><h3>Open option strategy orders</h3><p class="sub">Net price per '
-                     'spread: debit you pay or credit you receive. Mid/natural from the latest quotes. <b>Edge vs mid'
-                     '</b> = dollars your limit is better than the mid (positive: a better price, but less likely to '
-                     'fill; negative: you are paying up).</p>'
+                     'spread: debit you pay or credit you receive. Mid/natural are the last quotes (stale while the '
+                     f'market is closed); <b>Est.</b> is the model value at {when} from the re-pricing inputs above. '
+                     '<b>Edge</b> = dollars your limit is better than the mid / estimate (positive: a better price, but '
+                     'less likely to fill; negative: you are paying up).</p>'
                      + self.table(pd.DataFrame(rows), {
-                         "DTE": lambda v: num(v, 0), "Edge vs mid": lambda v: money(v, True), "Max profit": _lim,
+                         "DTE": lambda v: num(v, 0), "Edge vs mid": lambda v: money(v, True),
+                         "Edge vs est.": lambda v: money(v, True), "Max profit": _lim,
                          "Max loss": _lim, "Reward/risk": lambda v: num(v, 2),
                          "Prob. profit": lambda v: pct(v, dp=0), "Spot": lambda v: money(v)},
-                         tid="t_orders", pnl_cols=("Edge vs mid",)) + '</figure>')
+                         tid="t_orders", pnl_cols=("Edge vs mid", "Edge vs est.")) + '</figure>')
 
         # ---- payoff explorer
-        opts, views = [], []
+        opts, views, rp_views = [], [], []
         groups: dict[str, list] = {}
         for o in priced:
             groups.setdefault(o.underlying, []).append(o)
@@ -929,7 +1001,7 @@ class Report:
         for j, (kind, und, os_) in enumerate(items):
             vid = f"ov_{j}"
             if kind == "all":
-                d = O.combine(os_, a.open_positions, a.bundle.option_snapshots, today)
+                d = O.combine(os_, a.open_positions, snaps, today, market=market)
                 if not d:
                     continue
                 label = f"{und}: all {len(os_)} orders together"
@@ -942,42 +1014,73 @@ class Report:
                 comb = d
                 sp = d["spot"]
                 exp_lbl = min(o.expiry for o in os_ if o.expiry)
+                model, net_total, um, rows_k = d.get("model"), d["net"], None, []
+                est_total = d.get("est_open")
             else:
                 o = os_[0]
                 label = f"#{k_of[id(o)]} {name(o)} @ {px(o.net, o.net_is_estimate)}"
                 cur = o.curves
-                stats = (f"{o.legs_label} · limit {px(o.net, o.net_is_estimate)} (mid now {px(o.mid_now)}, natural "
+                stats = (f"{o.legs_label} · limit {px(o.net, o.net_is_estimate)} (quoted mid {px(o.mid_now)}, natural "
                          f"{px(o.natural)}) · max profit {_lim(o.max_gain)} · max loss {_lim(o.max_loss)} · reward/risk "
                          f"{num(rr(o), 2)} · breakevens {', '.join(f'${b:,.2f}' for b in o.breakevens) or 'none'}"
                          + (f" · prob. of profit ~{o.pop:.0%}" if o.pop is not None else ""))
                 comb = {k2.replace("comb_", ""): v for k2, v in o.curves.items() if k2.startswith("comb_")}
                 sp = o.spot
                 exp_lbl = o.expiry
+                model, um, rows_k = o.model or None, o.units * o.mult, [k_of[id(o)]]
+                net_total = o.net * um
+                est_total = o.est_open * um if o.est_open is not None else None
+            if model:
+                eu = None if um is None or est_total is None else est_total / um
+                est_txt = (f"Estimated value at {when}: <b>{px(est_total if um is None else eu)}</b>"
+                           + (f" vs your limit {px(net_total / um)} · {fill_text(eu, net_total / um)}" if um else
+                              f" vs {px(net_total)} at your limits"))
+                stats += f'<br><span class="rp-est" id="est_{vid}">{est_txt}</span>'
             if "combined" in cur:
                 stats += (f"<br>With your current {html.escape(und)} position: max loss after fill "
                           f"{_lim(comb.get('max_loss'))} · max profit {_lim(comb.get('max_gain'))} · breakevens "
                           f"{', '.join(f'${b:,.2f}' for b in comb.get('breakevens') or []) or 'none'}")
+            open_name = ("Order now (est.)" if market.is_open else "Order at next open (est.)") if model else "Order today (at IV)"
             data = [{"type": "scatter", "mode": "lines", "name": "Order at expiration", "x": cur["x"],
                      "y": cur["expiry"], "line": {"color": S1, "width": 2.5}},
-                    {"type": "scatter", "mode": "lines", "name": "Order today (at IV)", "x": cur["x"],
+                    {"type": "scatter", "mode": "lines", "name": open_name, "x": cur["x"],
                      "y": cur["today"], "line": {"color": S1, "width": 1.5, "dash": "dot"}}]
+            t_mark = t_comb = None
+            if model:
+                y0 = float(np.interp(sp, cur["x"], cur["today"]))
+                t_mark = len(data)
+                data.append({"type": "scatter", "mode": "markers", "name": "Estimated P&L at that price",
+                             "x": [sp], "y": [round(y0, 2)], "marker": {"color": S1, "size": 9, "symbol": "circle-open",
+                                                                         "line": {"width": 2}},
+                             "hovertemplate": "est. P&L %{y:$,.2f}<extra></extra>"})
             if "combined" in cur:
                 data += [{"type": "scatter", "mode": "lines", "name": "Current position at expiration",
                           "x": cur["x"], "y": cur["position"], "line": {"color": NEUTRAL, "width": 1.5}},
                          {"type": "scatter", "mode": "lines", "name": "Position + order at expiration",
                           "x": cur["x"], "y": cur["combined"], "line": {"color": "var:ink", "width": 2, "dash": "dash"}}]
+                if model and model.get("pos") and cur.get("combined_today"):
+                    t_comb = len(data)
+                    data.append({"type": "scatter", "mode": "lines", "name": "Position + order at next open (est.)",
+                                 "x": cur["x"], "y": cur["combined_today"],
+                                 "line": {"color": "var:ink", "width": 1.2, "dash": "dot"}})
             shapes = [{"type": "line", "x0": sp, "x1": sp, "yref": "paper", "y0": 0, "y1": 1,
                        "line": {"color": "var:muted", "width": 1, "dash": "dot"}},
                       {"type": "line", "xref": "paper", "x0": 0, "x1": 1, "y0": 0, "y1": 0,
                        "line": {"color": "var:axis", "width": 1}}]
+            mu = market.underlyings.get(und)
+            spot_lbl = ("latest" if mu and mu.stale else "spot")
             fig = self.fig(f"f_ord_{j}", data, {
                 "shapes": shapes, "hovermode": "x unified", "showlegend": True,
                 "legend": {"orientation": "h", "y": -0.22, "yanchor": "top"},
                 "xaxis": {"tickprefix": "$", "title": {"text": f"{und} price at expiration"
                                                                + (f" ({exp_lbl:%b %d})" if exp_lbl else "")}},
                 "yaxis": {"tickprefix": "$"},
-                "annotations": [{"x": sp, "yref": "paper", "y": 1, "text": f"spot ${sp:,.2f}", "showarrow": False,
+                "annotations": [{"x": sp, "yref": "paper", "y": 1, "text": f"{spot_lbl} ${sp:,.2f}", "showarrow": False,
                                  "yanchor": "bottom", "font": {"size": 11}}]}, 380)
+            if model:
+                rp_views.append({"fid": f"f_ord_{j}", "und": und, "x": cur["x"], "order": model["order"],
+                                 "pos": model.get("pos") if t_comb is not None else None, "net": net_total, "um": um,
+                                 "t_open": 1, "t_mark": t_mark, "t_comb": t_comb, "est": f"est_{vid}", "rows": rows_k})
             if und != group_open:
                 opts.append(("</optgroup>" if group_open else "") + f'<optgroup label="{html.escape(und)}">')
                 group_open = und
@@ -991,9 +1094,14 @@ class Report:
                          f'<label class="pick">Order <select class="interp" data-box="ob">{"".join(opts)}</select></label>'
                          f'<div id="ob">{"".join(views)}</div>'
                          f'<p class="note">P&amp;L at your limit price, fees excluded. Expiration curves value every leg at '
-                         f'intrinsic (later-dated legs of calendars/diagonals are approximated); "today" uses '
-                         f'Black-Scholes at each leg\'s snapshot IV. Where you already hold the underlying or options on it, '
-                         f'the dashed line shows the whole position after the fill.</p></figure>')
+                         f'intrinsic (later-dated legs of calendars/diagonals are approximated). The dotted curve is the '
+                         f'estimated value at {when} from the re-pricing inputs. Where you already hold the underlying '
+                         f'or options on it, the dashed line shows the whole position after the fill.</p></figure>')
+        if rp_views:
+            payload = {"r": RP.R, "when": when, "is_open": market.is_open, "views": rp_views,
+                       "est_col": "Est. now" if market.is_open else "Est. at open"}
+            parts.append('<script type="application/json" id="rp-data">'
+                         + json.dumps(_clean(payload), allow_nan=False).replace("</", "<\\/") + '</script>')
         parts.append(skip_note)
         self.section("orders", "Orders", "".join(parts))
 
@@ -1135,6 +1243,11 @@ def _nice_bins(s: pd.Series, target: int = 24):
     edges = np.arange(start, hi + step, step)
     # keep zero on an edge so wins and losses never share a bar
     return edges if len(edges) > 1 else np.array([lo - 1, hi + 1])
+
+
+def _clock(d) -> str:
+    """'9:30 AM' - portable (Pyodide's strftime has no %-I)."""
+    return f"{d.hour % 12 or 12}:{d.minute:02d} {'AM' if d.hour < 12 else 'PM'}"
 
 
 def _lim(v) -> str:

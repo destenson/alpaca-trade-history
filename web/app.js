@@ -157,6 +157,7 @@ class Alpaca {
 
   account() { return this.get(`${this.base}/v2/account`); }
   positions() { return this.get(`${this.base}/v2/positions`); }
+  clock() { return this.get(`${this.base}/v2/clock`); }
   openOrders() { return this.get(`${this.base}/v2/orders?status=open&nested=true&limit=500&direction=desc`); }
 
   async activities() {
@@ -246,6 +247,24 @@ class Alpaca {
     return out;
   }
 
+  // Raw stock snapshots (latest trade with time/size/conditions + daily bar). `feed` 'overnight' needs a
+  // market-data subscription; without one it just comes back empty.
+  async stockSnapshots(symbols, feed) {
+    const out = {};
+    for (let i = 0; i < symbols.length; i += 100) {
+      const syms = symbols.slice(i, i + 100).join(',');
+      let r;
+      try { r = await this.get(`${DATA}/v2/stocks/snapshots`, { symbols: syms, feed }); }
+      catch (e) {
+        if (feed) continue;
+        try { r = await this.get(`${DATA}/v2/stocks/snapshots`, { symbols: syms, feed: 'iex' }); }
+        catch (_) { continue; }
+      }
+      for (const [k, v] of Object.entries(r || {})) if (v) out[k] = v;
+    }
+    return out;
+  }
+
   async latestPrices(symbols) {
     const out = {};
     for (let i = 0; i < symbols.length; i += 100) {
@@ -321,7 +340,17 @@ async function fetchBundle(creds, benchmarks) {
   }
   const missing = [...new Set([...unds.filter((s) => !bars[s]), ...orderUnds])];
   const prices = missing.length ? await api.latestPrices(missing) : {};
-  return { account, activities, portfolio_history, positions, bars, option_snapshots, prices, orders };
+  // after-hours / overnight prints and the market clock, for re-pricing orders when the market is closed
+  let clock = null, stock_snapshots = {};
+  if (orderUnds.length) {
+    const unds = [...new Set(orderUnds)].sort();
+    step('Checking after-hours and overnight prices for order underlyings…');
+    try { clock = await api.clock(); } catch (_) { clock = null; }
+    stock_snapshots = { default: await api.stockSnapshots(unds) };
+    const night = await api.stockSnapshots(unds, 'overnight');
+    if (Object.keys(night).length) stock_snapshots.overnight = night;
+  }
+  return { account, activities, portfolio_history, positions, bars, option_snapshots, prices, orders, clock, stock_snapshots };
 }
 
 // --------------------------------------------------------------------------- Python

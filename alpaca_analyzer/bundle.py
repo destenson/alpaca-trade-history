@@ -11,6 +11,8 @@ Layout of a bundle directory::
     prices.json             {symbol: last_price}  optional extra marks
     option_snapshots.json   {occ_symbol: snapshot}  optional (greeks / IV / quotes for open options and order legs)
     orders.json             raw /v2/orders?status=open&nested=true  optional (projections for unfilled orders)
+    stock_snapshots.json    {feed: {symbol: snapshot}}  optional (after-hours / overnight prints for re-pricing)
+    clock.json              raw /v2/clock  optional (market open? next open)
 """
 from __future__ import annotations
 
@@ -35,6 +37,8 @@ class Bundle:
     prices: dict[str, float] = field(default_factory=dict)
     option_snapshots: dict[str, dict] = field(default_factory=dict)
     orders: list[dict] = field(default_factory=list)
+    stock_snapshots: dict[str, dict] = field(default_factory=dict)
+    clock: dict | None = None
 
     # ---------------------------------------------------------------- io
     @classmethod
@@ -56,6 +60,8 @@ class Bundle:
         b.prices = {k: float(v) for k, v in j("prices.json", {}).items()}
         b.option_snapshots = j("option_snapshots.json", {})
         b.orders = j("orders.json", [])
+        b.stock_snapshots = j("stock_snapshots.json", {})
+        b.clock = j("clock.json", None)
         if not b.activities:
             raise FileNotFoundError(f"No activities found in {p} (expected activities.json or activities.csv)")
         return b
@@ -76,6 +82,10 @@ class Bundle:
             (p / "option_snapshots.json").write_text(json.dumps(self.option_snapshots))
         if self.orders:
             (p / "orders.json").write_text(json.dumps(self.orders, indent=1))
+        if self.stock_snapshots:
+            (p / "stock_snapshots.json").write_text(json.dumps(self.stock_snapshots))
+        if self.clock:
+            (p / "clock.json").write_text(json.dumps(self.clock, indent=1))
 
 
 def read_activities_csv(path: Path) -> list[dict]:
@@ -161,6 +171,13 @@ def fetch_bundle(client, start: str | None = None, benchmarks: list[str] | None 
     need = sorted((unds - set(b.bars)) | o_unds)
     if need:
         b.prices = client.latest_prices([s for s in need if s.isalpha() or "." in s])
+    if o_unds:
+        log("Fetching latest prints for order underlyings (primary + overnight feeds) ...")
+        b.clock = client.clock()
+        b.stock_snapshots = {"default": client.stock_snapshots(sorted(o_unds), feed=feed)}
+        night = client.stock_snapshots(sorted(o_unds), feed="overnight")   # empty without a subscription
+        if night:
+            b.stock_snapshots["overnight"] = night
     return b
 
 
