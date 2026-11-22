@@ -135,6 +135,7 @@ function layoutFor(spec) {
   const out = Object.assign({}, base, l);
   out.xaxis = axis(Object.assign({ hoverformat: '' }, l.xaxis || {}));
   out.yaxis = axis(l.yaxis);
+  for (const k of Object.keys(l)) if (/^[xy]axis\d+$/.test(k)) out[k] = axis(l[k]);   // secondary axes
   delete out.xaxis.hoverformat;
   return out;
 }

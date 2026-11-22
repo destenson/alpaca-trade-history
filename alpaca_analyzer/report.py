@@ -504,23 +504,17 @@ class Report:
                                                "on your first trade date and sold on that last close. Positions still "
                                                "open are not counted. Sorted by your edge."))
 
-        # timing
+        # timing: totals are easily decided by one big trade, so show counts and medians alongside
         tt = t.assign(wd=t["open_time"].dt.dayofweek, hr=t["open_time"].dt.hour)
-        wd = tt.groupby("wd")["pnl"].agg(["sum", "count"]).reindex(range(5), fill_value=0)
-        names = ["Mon", "Tue", "Wed", "Thu", "Fri"]
-        data = [{"type": "bar", "x": names, "y": wd["sum"].round(2).tolist(), "customdata": wd["count"].tolist(),
-                 "marker": {"color": [_pn(v) for v in wd["sum"]]}, "showlegend": False,
-                 "hovertemplate": "%{x}: %{y:$,.2f}<br>%{customdata} lots<extra></extra>"}]
-        parts.append(self.fig("f_wd", data, {"yaxis": {"tickprefix": "$"}, "bargap": 0.35}, 260,
-                              title="Realized P&L by entry weekday"))
+        days = sorted(set(range(5)) | set(tt["wd"].unique()))
+        names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        parts.append(self._bucket_fig("f_wd", tt, "wd", days, [names[d] for d in days],
+                                      "Realized P&L by entry weekday", "", self.share))
         if not self.share:  # intraday timing is omitted from shared reports
-            hr = tt.groupby("hr")["pnl"].agg(["sum", "count"])
-            data = [{"type": "bar", "x": [f"{h:02d}:00" for h in hr.index], "y": hr["sum"].round(2).tolist(),
-                     "customdata": hr["count"].tolist(), "marker": {"color": [_pn(v) for v in hr["sum"]]},
-                     "showlegend": False, "hovertemplate": "%{x} ET: %{y:$,.2f}<br>%{customdata} lots<extra></extra>"}]
-            parts.append(self.fig("f_hr", data, {"yaxis": {"tickprefix": "$"}, "bargap": 0.25}, 260,
-                                  title="Realized P&L by entry hour (ET)",
-                                  subtitle="Includes overnight-session entries."))
+            hrs = sorted(tt["hr"].unique())
+            parts.append(self._bucket_fig("f_hr", tt, "hr", hrs, [f"{h:02d}:00" for h in hrs],
+                                          "Realized P&L by entry hour (ET)", "Includes overnight-session entries. ", False,
+                                          ticks=[str(h) for h in hrs]))
 
         # gantt
         g = t.copy()
@@ -562,6 +556,57 @@ class Report:
                                          "Fees": money, "P&L": lambda v: money(v, True), "Return": lambda v: pct(v, True)},
                                   tid="t_trades", pnl_cols=("P&L", "Return")) + '</figure>')
         self.section("trades", "Trades", "".join(parts))
+
+    def _bucket_fig(self, fid, t, key, keys, labels, title, sub, share, ticks=None) -> str:
+        """Total realized P&L per bucket (bars) with lot counts on the bars and the median lot (diamonds)."""
+        rows = []
+        for k in keys:
+            p = t.loc[t[key] == k, "pnl"]
+            n = len(p)
+            rows.append({"sum": float(p.sum()) if n else 0.0, "n": n,
+                         "median": float(p.median()) if n else None, "win": float((p > 0).mean()) if n else None,
+                         "best": float(p.max()) if n else None, "worst": float(p.min()) if n else None,
+                         "ex_worst": float(p.sum() - p.min()) if n > 1 and p.min() < 0 else None})
+        d = pd.DataFrame(rows)
+        sums = d["sum"].round(2).tolist()
+        meds = [None if v is None or pd.isna(v) else round(v, 2) for v in d["median"]]
+        def fmt(v):
+            return "–" if v is None or pd.isna(v) else money(v, True)
+        cd = [[int(r.n), "–" if r.win is None or pd.isna(r.win) else f"{r.win:.0%}", fmt(r.median), fmt(r.best),
+               fmt(r.worst), fmt(r.ex_worst) if r.ex_worst is not None and not pd.isna(r.ex_worst) else "n/a",
+               lab + (" ET" if ticks else "")]
+              for r, lab in zip(d.itertuples(), labels)]
+        ht = ("<b>%{customdata[6]}</b>: total %{y:$,.2f} over %{customdata[0]} lots<br>win rate %{customdata[1]} · median "
+              "%{customdata[2]}<br>best %{customdata[3]} · worst %{customdata[4]}<br>total without the worst lot "
+              "%{customdata[5]}<extra></extra>")
+        data = [{"type": "bar", "x": labels, "y": sums, "name": "Total", "customdata": cd,
+                 "marker": {"color": [_pn(v) for v in sums]}, "hovertemplate": ht},
+                {"type": "scatter", "mode": "markers", "x": labels, "y": meds, "yaxis": "y2", "name": "Median lot",
+                 "marker": {"color": "var:ink", "symbol": "diamond", "size": 8, "line": {"width": 1, "color": "var:surface"}},
+                 "customdata": cd,
+                 "hovertemplate": "<b>%{customdata[6]}</b>: median lot %{y:$,.2f} (%{customdata[0]} lots)<extra></extra>"}]
+        # put both zero lines at the same height: right range = left range scaled by k
+        lo, hi = min(0.0, min(sums)), max(0.0, max(sums))
+        span = (hi - lo) or 1.0
+        lo, hi = lo - 0.06 * span, hi + 0.06 * span
+        lo, hi = min(lo, -0.08 * span), max(hi, 0.08 * span)
+        mv = [m for m in meds if m is not None]
+        k = max([m / hi for m in mv if m > 0] + [m / lo for m in mv if m < 0] + [0.0]) * 1.1 or 1.0
+        # lot counts live in the category labels, under each name
+        ticktext = [f"{tk}<br><span style='font-size:10px'>{int(r.n)}</span>"
+                    for tk, r in zip(ticks or labels, d.itertuples())]
+        layout = {"xaxis": {"tickmode": "array", "tickvals": labels, "ticktext": ticktext, "tickangle": 0,
+                            "title": {"text": "number of closed lots under each label"
+                                      + (" · hour of entry, ET" if ticks else "")}},
+                  "yaxis": {"tickprefix": "$", "range": [lo, hi], "title": {"text": "total"}},
+                  "yaxis2": {"overlaying": "y", "side": "right", "tickprefix": "$", "range": [lo * k, hi * k],
+                             "showgrid": False, "zeroline": False, "title": {"text": "median lot"}},
+                  "bargap": 0.3 if len(keys) > 8 else 0.35, "showlegend": True,
+                  "legend": {"orientation": "h", "y": 1.02, "yanchor": "bottom", "x": 1, "xanchor": "right"},
+                  "margin": {"r": 56}}
+        return self.fig(fid, data, layout, 380, title=title,
+                        subtitle=sub + "Bars: total. Diamonds: the median lot (right axis). When they disagree, one "
+                                       "or two big trades decide the total: hover for details.")
 
     # -------------------------------------------------------------- options
     def _options(self):
