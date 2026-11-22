@@ -94,6 +94,11 @@ The first visit downloads ~20 MB of Python/pandas, which the browser then caches
   **non-extractable** WebCrypto key kept in IndexedDB, so the page opens straight into the report. The
   window slides with each visit; **Lock** or "Forget saved keys" ends it. While unlocked, same-origin
   scripts could ask the browser to decrypt, but the key bytes can't be read or copied out of the profile.
+* **Data cache**: past activities, daily bars and equity history are kept in IndexedDB (encrypted under their
+  own non-extractable key), so a refresh downloads only what's new. While the market is closed since the last
+  download, a refresh checks just positions and open orders (2 requests), plus stock prices while an
+  after-hours/overnight session trades; anything else comes from the saved copy. Bars are re-downloaded in
+  full weekly and after splits. **Re-download everything** bypasses it; Lock and Forget delete it.
 * **Isolation**: a Content-Security-Policy limits network access to Alpaca's hosts and the pinned CDN
   (scripts carry SRI hashes). The report renders in a sandboxed iframe with no access to the page's
   storage. Both the full and the shareable (`--share`) report can be downloaded.

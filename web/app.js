@@ -107,6 +107,74 @@ async function deviceUnlock() {
 
 async function lockDevice() {
   try { await idbDo('readwrite', (st) => st.delete(UNLOCK_ID)); } catch (e) { /* IndexedDB unavailable */ }
+  await clearCache();
+}
+
+// ---------------------------------------------------------------------- data cache
+// Account history (activities, daily bars, equity history) doesn't change once it's in the past, so it's
+// kept in IndexedDB and each refresh downloads only what's new. It's account data, so it's stored
+// AES-GCM-encrypted under its own random NON-EXTRACTABLE key (same protection as "keep unlocked"), one
+// record per key pair. Lock and "Forget saved keys" delete it.
+const CACHE_KEY_ID = 'cachekey';
+const CACHE_VERSION = 1;
+const BARS_FULL_DAYS = 7;       // re-download all bars weekly (adjusted history changes on dividends)
+
+async function cacheId(creds) {
+  const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${creds.env}:${creds.key}`));
+  return 'cache:' + b64(h).slice(0, 22);
+}
+async function cacheKey(create) {
+  let key = await idbDo('readonly', (st) => st.get(CACHE_KEY_ID));
+  if (!key && create) {
+    key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    await idbDo('readwrite', (st) => st.put(key, CACHE_KEY_ID));
+  }
+  return key;
+}
+async function loadCache(creds) {
+  try {
+    const id = await cacheId(creds);
+    const rec = await idbDo('readonly', (st) => st.get(id));
+    const key = rec && await cacheKey(false);
+    if (!rec || !key) return null;
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: rec.iv }, key, rec.ct);
+    const c = JSON.parse(new TextDecoder().decode(pt));
+    return c.v === CACHE_VERSION ? c : null;
+  } catch (e) {
+    console.warn('Ignoring unreadable data cache:', e);
+    return null;
+  }
+}
+async function saveCache(creds, data) {
+  try {
+    const key = await cacheKey(true);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key,
+      new TextEncoder().encode(JSON.stringify({ ...data, v: CACHE_VERSION })));
+    const id = await cacheId(creds);
+    await idbDo('readwrite', (st) => st.put({ iv, ct, savedAt: Date.now() }, id));
+  } catch (e) {
+    console.warn('Could not save the data cache:', e);
+  }
+}
+async function clearCache() {
+  try {
+    const keys = await idbDo('readonly', (st) => st.getAllKeys());
+    for (const k of keys) if (String(k).startsWith('cache')) await idbDo('readwrite', (st) => st.delete(k));
+  } catch (e) { /* IndexedDB unavailable */ }
+}
+
+// Is anything trading right now? Regular 9:30-16:00 is covered by the clock; pre-market (4:00), after
+// hours (to 20:00) and the overnight session (Sun-Thu 20:00 -> 4:00) can still move stock prices while
+// option quotes are frozen. Friday 20:00 -> Sunday 20:00 ET nothing trades.
+function stockSessionLive(now = new Date()) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short',
+    hour: 'numeric', hour12: false }).formatToParts(now).map((x) => [x.type, x.value]));
+  const h = +p.hour % 24, d = p.weekday;
+  if (d === 'Sat') return false;
+  if (d === 'Sun') return h >= 20;
+  if (d === 'Fri') return h < 20;
+  return true;
 }
 
 // ------------------------------------------------------------------------ progress UI
@@ -131,6 +199,7 @@ class Alpaca {
   constructor({ key, secret, env }) {
     this.base = TRADING[env] || TRADING.live;
     this.headers = { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, Accept: 'application/json' };
+    this.calls = 0;         // requests made, shown in the refresh status
   }
 
   async get(url, params = {}) {
@@ -138,6 +207,7 @@ class Alpaca {
     for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') u.searchParams.set(k, v);
     for (let attempt = 0; attempt < 5; attempt++) {
       let r;
+      this.calls++;
       try {
         r = await fetch(u, { headers: this.headers, referrerPolicy: 'no-referrer', cache: 'no-store' });
       } catch (e) {
@@ -160,9 +230,9 @@ class Alpaca {
   clock() { return this.get(`${this.base}/v2/clock`); }
   openOrders() { return this.get(`${this.base}/v2/orders?status=open&nested=true&limit=500&direction=desc`); }
 
-  async activities() {
+  async activities(after) {
     const out = [];
-    const params = { direction: 'asc', page_size: 100 };
+    const params = { direction: 'asc', page_size: 100, after };
     for (;;) {
       const page = await this.get(`${this.base}/v2/account/activities`, params);
       if (!page || !page.length) break;
@@ -297,8 +367,118 @@ function tradedUnderlyings(acts) {
   return [...s].filter((x) => /^[A-Z][A-Z.]{0,6}$/.test(x));
 }
 
-async function fetchBundle(creds, benchmarks) {
+function orderOptionSymbols(orders) {
+  const out = new Set();
+  for (const o of orders) {
+    for (const sym of [o.symbol, ...(o.legs || []).map((l) => l.symbol)]) if (sym && OCC.test(sym)) out.add(sym);
+  }
+  return out;
+}
+const actDate = (a) => (a.transaction_time || a.date || '').slice(0, 10);
+const posKey = (ps) => ps.map((p) => `${p.symbol}:${p.qty}`).sort().join(',');
+
+function mergeActivities(old, fresh) {
+  const seen = new Set(old.map((a) => a.id));
+  return [...old, ...fresh.filter((a) => !a.id || !seen.has(a.id))];
+}
+function mergeHistory(old, fresh) {
+  if (!fresh.timestamp.length) return old;
+  const cut = fresh.timestamp[0];
+  const keep = old.timestamp.findIndex((t) => t >= cut);
+  const n = keep < 0 ? old.timestamp.length : keep;
+  const out = { timestamp: [...old.timestamp.slice(0, n), ...fresh.timestamp],
+                equity: [...old.equity.slice(0, n), ...fresh.equity], cashflow: {}, timeframe: '1D' };
+  for (const k of new Set([...Object.keys(old.cashflow || {}), ...Object.keys(fresh.cashflow || {})])) {
+    const a = (old.cashflow[k] || []).slice(0, n);
+    while (a.length < n) a.push(0);
+    const b = fresh.cashflow[k] || fresh.timestamp.map(() => 0);
+    out.cashflow[k] = [...a, ...b];
+  }
+  return out;
+}
+function mergeBars(old, fresh) {
+  const out = { ...old };
+  for (const [sym, bars] of Object.entries(fresh)) {
+    if (!bars.length) continue;
+    const cut = bars[0].t;
+    out[sym] = [...(old[sym] || []).filter((b) => b.t < cut), ...bars];
+  }
+  return out;
+}
+
+async function fetchSnapshots(api, positions, orders, unds, bars, prev) {
+  const orderOpts = orderOptionSymbols(orders);
+  const orderUnds = [...orderOpts].map((s) => OCC.exec(s)[1]);
+  const openOpts = [...new Set([...positions.filter((p) => p.asset_class === 'us_option').map((p) => p.symbol), ...orderOpts])];
+  const rpUnds = [...new Set([...orderUnds, ...openOpts.map((s) => OCC.exec(s)[1])])].sort();
+  let option_snapshots = {};
+  if (openOpts.length) {
+    step(`Loading quotes and Greeks for ${openOpts.length} option contracts (positions + open orders)…`);
+    option_snapshots = await api.optionSnapshots(openOpts);
+  }
+  const missing = [...new Set([...unds.filter((s) => !bars[s]), ...orderUnds])];
+  const prices = missing.length ? await api.latestPrices(missing) : {};
+  let clock = null, stock_snapshots = {};
+  if (rpUnds.length) {
+    step('Checking after-hours and overnight prices for option underlyings…');
+    try { clock = await api.clock(); } catch (_) { clock = prev?.clock || null; }
+    stock_snapshots = { default: await api.stockSnapshots(rpUnds) };
+    const night = await api.stockSnapshots(rpUnds, 'overnight');
+    if (Object.keys(night).length) stock_snapshots.overnight = night;
+  } else {
+    try { clock = await api.clock(); } catch (_) { clock = null; }
+  }
+  return { option_snapshots, prices, clock, stock_snapshots };
+}
+
+// mode: 'full' (no cache / forced), 'update' (download only what's new), 'closed' (market closed since the
+// cached copy: only open orders and positions are checked, plus stock prints while a session trades)
+async function fetchBundle(creds, benchmarks, force = false) {
   const api = new Alpaca(creds);
+  const cache = force ? null : await loadCache(creds);
+  const now = Date.now();
+  const clockC = cache?.clock;
+  const closedSince = cache && clockC && !clockC.is_open && clockC.next_open && now < Date.parse(clockC.next_open);
+  const syms = (acts) => [...new Set([...tradedUnderlyings(acts), ...benchmarks])].sort();
+
+  let pre = null;              // positions/orders already fetched by the closed-market check
+  if (closedSince) {
+    step('Market closed since the last download: checking open orders and positions…');
+    let positions, orders;
+    try { [positions, orders] = [await api.positions(), await api.openOrders()]; }
+    catch (e) {
+      if (e.status === 401 || e.status === 403) throw new Error(`Alpaca rejected these keys for the ${creds.env} endpoint.`);
+      throw e;
+    }
+    if (posKey(positions) === posKey(cache.positions || [])) {
+      const b = { ...cache, positions, orders };
+      // order legs or benchmarks not seen before: fetch just those
+      const newOpts = [...orderOptionSymbols(orders)].filter((s) => !b.option_snapshots[s]);
+      b.option_snapshots = { ...(b.option_snapshots || {}) };
+      if (newOpts.length) Object.assign(b.option_snapshots, await api.optionSnapshots(newOpts));
+      const rpUnds = [...new Set([...orderOptionSymbols(orders)].map((s) => OCC.exec(s)[1]))];
+      const newUnds = rpUnds.filter((u) => !(b.stock_snapshots?.default || {})[u]);
+      if (stockSessionLive() || newUnds.length) {
+        const want = stockSessionLive() ? [...new Set([...rpUnds, ...Object.keys(b.stock_snapshots?.default || {})])] : newUnds;
+        step('Checking after-hours / overnight prices…');
+        const dflt = await api.stockSnapshots(want);
+        const night = await api.stockSnapshots(want, 'overnight');
+        b.stock_snapshots = { default: { ...(b.stock_snapshots?.default || {}), ...dflt },
+                              overnight: { ...(b.stock_snapshots?.overnight || {}), ...night } };
+      }
+      const tried = new Set(b.barsTried || Object.keys(b.bars));
+      const needBars = syms(b.activities).filter((s) => !tried.has(s));
+      if (needBars.length) {
+        b.bars = { ...b.bars, ...await api.dailyBars(needBars, b.barStart) };
+        b.barsTried = [...tried, ...needBars];
+      }
+      await saveCache(creds, { ...b, savedAt: cache.savedAt });
+      return { bundle: b, meta: { mode: 'closed', calls: api.calls, savedAt: cache.savedAt } };
+    }
+    step('Positions changed since the last download (expiration, assignment or a fill): updating…');
+    pre = { positions, orders };
+  }
+
   step('Checking keys and loading account…');
   let account;
   try { account = await api.account(); }
@@ -308,50 +488,62 @@ async function fetchBundle(creds, benchmarks) {
     }
     throw e;
   }
-  step('Downloading account activity…');
-  const activities = await api.activities();
-  const dates = activities.map((a) => (a.transaction_time || a.date || '').slice(0, 10)).filter(Boolean).sort();
-  const first = dates[0] || new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10);
-  step('Downloading daily equity history…');
-  const portfolio_history = await api.portfolioHistory(`${first}T00:00:00Z`);
-  note(`${portfolio_history.timestamp.length} days`);
+  let activities, portfolio_history, bars, barStart, barsFullAt, newActs = [];
+  if (cache) {
+    const last = cache.activities.map(actDate).filter(Boolean).sort().pop();
+    const after = last ? new Date(Date.parse(last) - 3 * 864e5).toISOString().slice(0, 10) : undefined;
+    step('Downloading new account activity…');
+    const fresh = await api.activities(after);
+    const known = new Set(cache.activities.map((a) => a.id));
+    newActs = fresh.filter((a) => !a.id || !known.has(a.id));
+    activities = mergeActivities(cache.activities, fresh);
+    note(`${newActs.length} new`);
+    const lastTs = cache.portfolio_history.timestamp.at(-1);
+    step('Updating daily equity history…');
+    portfolio_history = lastTs
+      ? mergeHistory(cache.portfolio_history, await api.portfolioHistory(iso(new Date((lastTs - 7 * 86400) * 1000))))
+      : cache.portfolio_history;
+  } else {
+    step('Downloading account activity…');
+    activities = await api.activities();
+    const first = activities.map(actDate).filter(Boolean).sort()[0] || new Date(now - 365 * 864e5).toISOString().slice(0, 10);
+    step('Downloading daily equity history…');
+    portfolio_history = await api.portfolioHistory(`${first}T00:00:00Z`);
+    note(`${portfolio_history.timestamp.length} days`);
+  }
+  const first = activities.map(actDate).filter(Boolean).sort()[0] || new Date(now - 365 * 864e5).toISOString().slice(0, 10);
+  barStart = new Date(new Date(first).getTime() - 7 * 864e5).toISOString().slice(0, 10) + 'T00:00:00Z';
   step('Downloading open positions…');
-  const positions = await api.positions();
-  const unds = tradedUnderlyings(activities);
-  const syms = [...new Set([...unds, ...benchmarks])].sort();
-  step(`Downloading daily prices for ${syms.length} symbols…`);
-  const barStart = new Date(new Date(first).getTime() - 7 * 864e5).toISOString().slice(0, 10) + 'T00:00:00Z';
-  const bars = await api.dailyBars(syms, barStart);
+  const positions = pre ? pre.positions : await api.positions();
+  const allSyms = syms(activities);
+  let barsTried;
+  const weekly = !cache || !(now - (cache.barsFullAt || 0) < BARS_FULL_DAYS * 864e5) || cache.barStart !== barStart;
+  if (weekly) {
+    step(`Downloading daily prices for ${allSyms.length} symbols…`);
+    bars = await api.dailyBars(allSyms, barStart);
+    barsFullAt = now;
+    barsTried = allSyms;
+  } else {
+    // a split rewrites a symbol's whole adjusted history; new symbols need their full history too
+    const split = new Set(newActs.filter((a) => /^(SPLIT|SPIN|REORG|NC)$/.test(a.activity_type || '') && a.symbol)
+      .map((a) => (OCC.exec(a.symbol)?.[1] || a.symbol)));
+    const tried = new Set(cache.barsTried || Object.keys(cache.bars));
+    const full = allSyms.filter((s) => !tried.has(s) || split.has(s));
+    const inc = allSyms.filter((s) => !full.includes(s) && cache.bars[s]);   // symbols with no bars stay skipped
+    barsTried = [...new Set([...tried, ...allSyms])];
+    step(`Updating daily prices (${inc.length} symbols${full.length ? `, ${full.length} in full` : ''})…`);
+    const lastDay = inc.map((s) => cache.bars[s]?.at(-1)?.t).filter(Boolean).sort()[0];
+    const incStart = lastDay ? new Date(Date.parse(lastDay) - 5 * 864e5).toISOString().slice(0, 10) + 'T00:00:00Z' : barStart;
+    bars = mergeBars(cache.bars, inc.length ? await api.dailyBars(inc, incStart) : {});
+    if (full.length) bars = { ...bars, ...await api.dailyBars(full, barStart) };
+    barsFullAt = cache.barsFullAt;
+  }
   step('Downloading open orders…');
-  const orders = await api.openOrders();
-  // option contracts in open orders (multi-leg legs are nested under their parent)
-  const orderOpts = new Set();
-  for (const o of orders) {
-    for (const sym of [o.symbol, ...(o.legs || []).map((l) => l.symbol)]) {
-      if (sym && OCC.test(sym)) orderOpts.add(sym);
-    }
-  }
-  const orderUnds = [...orderOpts].map((s) => OCC.exec(s)[1]);
-  const openOpts = [...new Set([...positions.filter((p) => p.asset_class === 'us_option').map((p) => p.symbol), ...orderOpts])];
-  let option_snapshots = {};
-  if (openOpts.length) {
-    step(`Loading quotes and Greeks for ${openOpts.length} option contracts (positions + open orders)…`);
-    option_snapshots = await api.optionSnapshots(openOpts);
-  }
-  const missing = [...new Set([...unds.filter((s) => !bars[s]), ...orderUnds])];
-  const prices = missing.length ? await api.latestPrices(missing) : {};
-  // after-hours / overnight prints and the market clock, for re-pricing orders when the market is closed
-  let clock = null, stock_snapshots = {};
-  const rpUnds = [...new Set([...orderUnds, ...openOpts.map((s) => OCC.exec(s)[1])])].sort();
-  if (rpUnds.length) {
-    const unds = rpUnds;
-    step('Checking after-hours and overnight prices for option underlyings…');
-    try { clock = await api.clock(); } catch (_) { clock = null; }
-    stock_snapshots = { default: await api.stockSnapshots(unds) };
-    const night = await api.stockSnapshots(unds, 'overnight');
-    if (Object.keys(night).length) stock_snapshots.overnight = night;
-  }
-  return { account, activities, portfolio_history, positions, bars, option_snapshots, prices, orders, clock, stock_snapshots };
+  const orders = pre ? pre.orders : await api.openOrders();
+  const snaps = await fetchSnapshots(api, positions, orders, tradedUnderlyings(activities), bars, cache);
+  const bundle = { account, activities, portfolio_history, positions, bars, orders, ...snaps };
+  await saveCache(creds, { ...bundle, barStart, barsFullAt, barsTried, savedAt: now });
+  return { bundle, meta: { mode: cache ? 'update' : 'full', calls: api.calls, newActs: newActs.length } };
 }
 
 // --------------------------------------------------------------------------- Python
@@ -378,10 +570,12 @@ let currentView = 'full';
 let currentTab = null;    // report tab the viewer is on (reported by the frame)
 let refreshing = false;
 
-async function analyze(creds) {
+let lastMeta = null;
+async function analyze(creds, force = false) {
   const benchmarks = ($('bench').value || 'SPY QQQ').toUpperCase().split(/[\s,]+/).filter(Boolean);
   const pyLoading = loadPython();   // download Python in parallel with the API calls
-  const bundle = await fetchBundle(creds, benchmarks);
+  const { bundle, meta } = await fetchBundle(creds, benchmarks, force);
+  lastMeta = meta;
   step('Starting the analysis engine (first visit downloads ~20 MB, then it\'s cached)…');
   const py = await pyLoading;
   step(`Rebuilding ${bundle.activities.length} activities into lots, strategies and charts…`);
@@ -397,7 +591,14 @@ function applyResult(out) {
   $('summary').innerHTML = s
     ? `<b>${fmtMoney(s.equity)}</b> equity · P&amp;L <b>${fmtMoney(s.pnl, true)}</b> · time-weighted <b>${fmtPct(s.twr)}</b> · max drawdown <b>${fmtPct(s.max_dd)}</b>`
     : 'Report ready.';
-  $('updated').textContent = 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const t = (ms) => new Date(ms).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  const m = lastMeta || {};
+  const how = m.mode === 'closed'
+    ? ` · market closed: ${m.calls} request${m.calls === 1 ? '' : 's'}, history from the copy saved ${t(m.savedAt)}`
+    : m.mode === 'update' ? ` · ${m.calls} requests, only new data (${m.newActs} new activit${m.newActs === 1 ? 'y' : 'ies'})`
+    : m.mode === 'full' ? ` · full download, ${m.calls} requests` : '';
+  $('updated').textContent = 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + how;
+  $('refreshAll').hidden = !(m.mode === 'closed' || m.mode === 'update');
 }
 
 async function run(creds) {
@@ -428,7 +629,7 @@ async function run(creds) {
 }
 
 // Re-fetch and re-analyze with the in-memory keys; the current report stays up until the new one is ready.
-async function refresh() {
+async function refresh(force = false) {
   if (!lastCreds || refreshing) return;
   refreshing = true;
   const btn = $('refresh');
@@ -437,7 +638,7 @@ async function refresh() {
   $('refreshStatus').classList.remove('err');
   stepSink = (t) => { $('refreshStatus').textContent = '· ' + t; };
   try {
-    applyResult(await analyze(lastCreds));
+    applyResult(await analyze(lastCreds, force));
     $('refreshStatus').textContent = '';
   } catch (e) {
     console.error(e);
@@ -547,7 +748,8 @@ $('viewShare').addEventListener('click', () => show('share'));
 $('dlFull').addEventListener('click', () => download('full'));
 $('dlShare').addEventListener('click', () => download('share'));
 $('again').addEventListener('click', () => location.reload());
-$('refresh').addEventListener('click', refresh);
+$('refresh').addEventListener('click', () => refresh());
+$('refreshAll').addEventListener('click', () => refresh(true));
 $('lock').addEventListener('click', async () => {
   await lockDevice();
   $('lock').hidden = true;
