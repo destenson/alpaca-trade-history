@@ -391,13 +391,36 @@ class Report:
         for i, (sym, bf) in enumerate(a.bench.items()):
             data.append({"type": "scatter", "mode": "lines", "name": sym, "x": x, "y": bf["dd"].round(5).tolist(),
                          "line": {"color": [S2, S3, S4][i % 3], "width": 2}})
+        dd_now = float(e["dd"].iloc[-1])
+        peak_d = e["twr"].idxmax()
+        deepest = float(e["dd"].min())
         parts = [self.fig("f_underwater", data, {"yaxis": {"tickformat": ".0%"}, "hovermode": "x unified"}, 320,
                           title="Underwater curve (time-weighted)",
-                          subtitle="Distance below the running peak of the deposit-neutral return index.", wide=True)]
-        data = [{"type": "scatter", "mode": "lines", "name": "Dollar drawdown", "x": x, "y": e["dd_dollar"].round(2).tolist(),
-                 "fill": "tozeroy", "line": {"color": LOSS, "width": 2}, "fillcolor": "var:loss-fill", "showlegend": False}]
-        parts.append(self.fig("f_dd_dollar", data, {"yaxis": {"tickprefix": "$"}}, 260,
-                              title="Dollar drawdown of cumulative P&L"))
+                          subtitle="How far the deposit-neutral return index is below its own best level so far — "
+                                   "a fall from the peak, not a loss on your deposits. "
+                                   + (f"Now {pct(dd_now, dp=1)} below the {peak_d:%b} {peak_d.day} peak" if dd_now < -1e-9
+                                      else "At a new high")
+                                   + f"; deepest {pct(deepest, dp=1)}.", wide=True)]
+        cum = e["cum_pnl"]
+        hwm = cum.cummax()
+        gap = cum - hwm
+        data = [{"type": "scatter", "mode": "lines", "name": "Peak so far (high-water mark)", "x": x,
+                 "y": hwm.round(2).tolist(), "line": {"color": NEUTRAL, "width": 1.5, "dash": "dot", "shape": "hv"},
+                 "hovertemplate": "peak %{y:$,.2f}<extra></extra>"},
+                {"type": "scatter", "mode": "lines", "name": "Cumulative P&L", "x": x, "y": cum.round(2).tolist(),
+                 "fill": "tonexty", "fillcolor": "var:loss-fill", "line": {"color": S1, "width": 2},
+                 "customdata": gap.round(2).tolist(),
+                 "hovertemplate": "P&L %{y:$,.2f}<br>%{customdata:$,.2f} vs. the peak<extra></extra>"}]
+        now, top, top_d = float(cum.iloc[-1]), float(hwm.iloc[-1]), cum.idxmax()
+        sub = (f"Now {money(now, True, 0)} on your deposits"
+               + (f", {money(top - now, dp=0)} below the peak of {money(top, True, 0)} on {top_d:%b} {top_d.day}"
+                  if top - now > 0.5 else ", at its peak")
+               + ". The shaded gap is the drawdown: the distance from the best level reached so far.")
+        parts.append(self.fig("f_dd_dollar", data, {"yaxis": {"tickprefix": "$"}, "hovermode": "x unified",
+                                                    "shapes": [{"type": "line", "xref": "paper", "x0": 0, "x1": 1,
+                                                                "y0": 0, "y1": 0, "line": {"color": "var:axis",
+                                                                                           "width": 1}}]}, 300,
+                              title="Cumulative P&L and its high-water mark", subtitle=sub))
         dd = a.drawdowns
         if dd is not None and not dd.empty:
             show = dd.assign(peak=dd["peak"].map(_iso), trough=dd["trough"].map(_iso),
@@ -558,55 +581,84 @@ class Report:
         self.section("trades", "Trades", "".join(parts))
 
     def _bucket_fig(self, fid, t, key, keys, labels, title, sub, share, ticks=None) -> str:
-        """Total realized P&L per bucket (bars) with lot counts on the bars and the median lot (diamonds)."""
+        """Trades-tab timing charts: one bucket per value of ``t[key]``."""
+        groups = [(lab, tk, t.loc[t[key] == k, "pnl"]) for k, lab, tk in zip(keys, labels, ticks or labels)]
+        return self._dist_fig(fid, groups, title, sub, unit="lots", hover_suffix=" ET" if ticks else "",
+                              axis_title="number of closed lots under each label"
+                                         + (" · hour of entry, ET" if ticks else ""))
+
+    def _dist_fig(self, fid, groups, title, sub="", horizontal=False, unit="lots", hover_suffix="",
+                  axis_title="", height=None) -> str:
+        """Total P&L per group (bars), the group's size in its label, and the median item (diamonds on a second
+        axis whose zero lines up with the bars'). ``groups``: [(label, tick label, pnl Series)]."""
         rows = []
-        for k in keys:
-            p = t.loc[t[key] == k, "pnl"]
+        for lab, tk, p in groups:
+            p = pd.Series(p, dtype=float).dropna()
             n = len(p)
-            rows.append({"sum": float(p.sum()) if n else 0.0, "n": n,
+            rows.append({"lab": lab, "tk": tk, "n": n, "sum": float(p.sum()) if n else 0.0,
                          "median": float(p.median()) if n else None, "win": float((p > 0).mean()) if n else None,
                          "best": float(p.max()) if n else None, "worst": float(p.min()) if n else None,
                          "ex_worst": float(p.sum() - p.min()) if n > 1 and p.min() < 0 else None})
-        d = pd.DataFrame(rows)
-        sums = d["sum"].round(2).tolist()
-        meds = [None if v is None or pd.isna(v) else round(v, 2) for v in d["median"]]
+
         def fmt(v):
             return "–" if v is None or pd.isna(v) else money(v, True)
-        cd = [[int(r.n), "–" if r.win is None or pd.isna(r.win) else f"{r.win:.0%}", fmt(r.median), fmt(r.best),
-               fmt(r.worst), fmt(r.ex_worst) if r.ex_worst is not None and not pd.isna(r.ex_worst) else "n/a",
-               lab + (" ET" if ticks else "")]
-              for r, lab in zip(d.itertuples(), labels)]
-        ht = ("<b>%{customdata[6]}</b>: total %{y:$,.2f} over %{customdata[0]} lots<br>win rate %{customdata[1]} · median "
-              "%{customdata[2]}<br>best %{customdata[3]} · worst %{customdata[4]}<br>total without the worst lot "
-              "%{customdata[5]}<extra></extra>")
-        data = [{"type": "bar", "x": labels, "y": sums, "name": "Total", "customdata": cd,
-                 "marker": {"color": [_pn(v) for v in sums]}, "hovertemplate": ht},
-                {"type": "scatter", "mode": "markers", "x": labels, "y": meds, "yaxis": "y2", "name": "Median lot",
-                 "marker": {"color": "var:ink", "symbol": "diamond", "size": 8, "line": {"width": 1, "color": "var:surface"}},
-                 "customdata": cd,
-                 "hovertemplate": "<b>%{customdata[6]}</b>: median lot %{y:$,.2f} (%{customdata[0]} lots)<extra></extra>"}]
-        # put both zero lines at the same height: right range = left range scaled by k
+
+        labels = [r["lab"] for r in rows]
+        sums = [round(r["sum"], 2) for r in rows]
+        meds = [None if r["median"] is None else round(r["median"], 2) for r in rows]
+        cd = [[r["n"], "–" if r["win"] is None else f"{r['win']:.0%}", fmt(r["median"]), fmt(r["best"]),
+               fmt(r["worst"]), fmt(r["ex_worst"]) if r["ex_worst"] is not None else "n/a", r["lab"] + hover_suffix]
+              for r in rows]
+        v = "x" if horizontal else "y"
+        ht = (f"<b>%{{customdata[6]}}</b>: total %{{{v}:$,.2f}} over %{{customdata[0]}} {unit}<br>win rate "
+              "%{customdata[1]} · median %{customdata[2]}<br>best %{customdata[3]} · worst %{customdata[4]}<br>"
+              f"total without the worst one %{{customdata[5]}}<extra></extra>")
+        bar = {"type": "bar", "name": "Total", "customdata": cd, "marker": {"color": [_pn(x) for x in sums]},
+               "hovertemplate": ht}
+        dia = {"type": "scatter", "mode": "markers", "name": f"Median {unit[:-1] if unit.endswith('s') else unit}",
+               "marker": {"color": "var:ink", "symbol": "diamond", "size": 8, "line": {"width": 1, "color": "var:surface"}},
+               "customdata": cd,
+               "hovertemplate": f"<b>%{{customdata[6]}}</b>: median %{{{v}:$,.2f}} (%{{customdata[0]}} {unit})<extra></extra>"}
+        if horizontal:
+            bar.update(orientation="h", y=labels, x=sums)
+            dia.update(y=labels, x=meds, xaxis="x2")
+        else:
+            bar.update(x=labels, y=sums)
+            dia.update(x=labels, y=meds, yaxis="y2")
+        # both zero lines at the same place: the median axis is the total axis scaled by k
         lo, hi = min(0.0, min(sums)), max(0.0, max(sums))
         span = (hi - lo) or 1.0
-        lo, hi = lo - 0.06 * span, hi + 0.06 * span
-        lo, hi = min(lo, -0.08 * span), max(hi, 0.08 * span)
+        lo, hi = min(lo - 0.06 * span, -0.08 * span), max(hi + 0.06 * span, 0.08 * span)
         mv = [m for m in meds if m is not None]
         k = max([m / hi for m in mv if m > 0] + [m / lo for m in mv if m < 0] + [0.0]) * 1.1 or 1.0
-        # lot counts live in the category labels, under each name
-        ticktext = [f"{tk}<br><span style='font-size:10px'>{int(r.n)}</span>"
-                    for tk, r in zip(ticks or labels, d.itertuples())]
-        layout = {"xaxis": {"tickmode": "array", "tickvals": labels, "ticktext": ticktext, "tickangle": 0,
-                            "title": {"text": "number of closed lots under each label"
-                                      + (" · hour of entry, ET" if ticks else "")}},
-                  "yaxis": {"tickprefix": "$", "range": [lo, hi], "title": {"text": "total"}},
-                  "yaxis2": {"overlaying": "y", "side": "right", "tickprefix": "$", "range": [lo * k, hi * k],
-                             "showgrid": False, "zeroline": False, "title": {"text": "median lot"}},
-                  "bargap": 0.3 if len(keys) > 8 else 0.35, "showlegend": True,
-                  "legend": {"orientation": "h", "y": 1.02, "yanchor": "bottom", "x": 1, "xanchor": "right"},
-                  "margin": {"r": 56}}
-        return self.fig(fid, data, layout, 380, title=title,
-                        subtitle=sub + "Bars: total. Diamonds: the median lot (right axis). When they disagree, one "
-                                       "or two big trades decide the total: hover for details.")
+        main = {"tickprefix": "$", "range": [lo, hi], "title": {"text": "total"}}
+        second = {"overlaying": v, "tickprefix": "$", "range": [lo * k, hi * k], "showgrid": False, "zeroline": False,
+                  "title": {"text": "median"}}
+        if horizontal:
+            ticktext = [f"{r['tk']} <span style='font-size:10px'>· {r['n']}</span>" for r in rows]
+            cat = {"tickmode": "array", "tickvals": labels, "ticktext": ticktext}
+            layout = {"xaxis": main, "xaxis2": {**second, "side": "top"}, "yaxis": cat,
+                      "margin": {"l": 180, "t": 40}}
+            h = height or max(280, 30 * len(rows) + 110)
+        else:
+            ticktext = [f"{r['tk']}<br><span style='font-size:10px'>{r['n']}</span>" for r in rows]
+            cat = {"tickmode": "array", "tickvals": labels, "ticktext": ticktext, "tickangle": 0,
+                   "title": {"text": axis_title or f"number of {unit} under each label"}}
+            layout = {"xaxis": cat, "yaxis": main, "yaxis2": {**second, "side": "right"}, "margin": {"r": 56},
+                      "bargap": 0.3 if len(rows) > 8 else 0.35}
+            h = height or 380
+        layout.update({"showlegend": True, "legend": {"orientation": "h", "y": 1.02, "yanchor": "bottom", "x": 1,
+                                                       "xanchor": "right"}})
+        if horizontal:   # the legend names the two axes; titles would collide with it
+            main["title"] = {"text": ""}
+            layout["xaxis2"]["title"] = {"text": ""}
+            layout["legend"] = {"orientation": "h", "y": -0.06, "yanchor": "top", "x": 1, "xanchor": "right"}
+            layout["xaxis2"]["ticksuffix"] = " median"
+            layout["xaxis"]["ticksuffix"] = ""
+        return self.fig(fid, [bar, dia], layout, h, title=title,
+                        subtitle=(sub + " " if sub else "") + f"Bars: total, with the number of {unit} by each "
+                                 "label. Diamonds: the median (second axis); when it disagrees with the bar, a few "
+                                 "big results decide the total.")
 
     # -------------------------------------------------------------- options
     def _options(self):
@@ -630,17 +682,12 @@ class Report:
             ("Median DTE at entry", f"{c['dte'].median():.0f} d", f"median hold {_dur(done['hold_days'].median())}"),
         ]))
 
-        by = c.groupby("strategy").agg(pnl=("pnl", "sum"), n=("pnl", "size"), wins=("pnl", lambda s: (s > 0).sum()),
-                                       avg=("pnl", "mean"), ror=("ror", "median")).sort_values("pnl")
-        data = [{"type": "bar", "orientation": "h", "y": by.index.tolist(), "x": by["pnl"].round(2).tolist(),
-                 "marker": {"color": [_pn(v) for v in by["pnl"]]}, "showlegend": False,
-                 "customdata": np.c_[by["n"], by["wins"] / by["n"], by["avg"]].round(3).tolist(),
-                 "hovertemplate": "<b>%{y}</b><br>%{x:$,.2f} over %{customdata[0]} trades<br>win rate "
-                                  "%{customdata[1]:.0%}<br>avg %{customdata[2]:$,.2f}<extra></extra>"}]
-        parts.append(self.fig("f_strat", data, {"xaxis": {"tickprefix": "$"}, "margin": {"l": 170}},
-                              max(260, 30 * len(by) + 60), title="P&L by strategy",
-                              subtitle="Legs opened within the grouping window on one underlying form a strategy; "
-                                       "covered calls are detected from shares held at entry."))
+        open_note = "Open strategies count with their unrealized P&L."
+        by = c.groupby("strategy")["pnl"].sum().sort_values()
+        parts.append(self._dist_fig("f_strat", [(k, k, c.loc[c["strategy"] == k, "pnl"]) for k in by.index],
+                                    "P&L by strategy", "Legs opened within the grouping window on one underlying form "
+                                    "a strategy; covered calls are detected from shares held at entry. " + open_note,
+                                    horizontal=True, unit="trades"))
 
         # cumulative by strategy (top 5 + other)
         top = c.groupby("strategy")["pnl"].apply(lambda s: s.abs().sum()).sort_values(ascending=False).index[:5]
@@ -657,47 +704,30 @@ class Report:
 
         def bucket_chart(fid, col, edges, labels, title, sub=""):
             b = pd.cut(c[col], edges, labels=labels, right=True, include_lowest=True)
-            agg = c.groupby(b, observed=False)["pnl"].agg(["sum", "count", lambda s: (s > 0).mean()])
-            agg.columns = ["sum", "count", "wr"]
-            d = [{"type": "bar", "x": labels, "y": agg["sum"].round(2).tolist(),
-                  "marker": {"color": [_pn(v) for v in agg["sum"]]}, "showlegend": False,
-                  "text": [f"n={int(n)}" for n in agg["count"]], "textposition": "outside", "cliponaxis": False,
-                  "customdata": agg[["count", "wr"]].fillna(0).values.tolist(),
-                  "hovertemplate": "%{x}: %{y:$,.2f}<br>%{customdata[0]} trades · win rate %{customdata[1]:.0%}<extra></extra>"}]
-            return self.fig(fid, d, {"yaxis": {"tickprefix": "$"}, "bargap": 0.3}, 280, title=title, subtitle=sub)
+            return self._dist_fig(fid, [(lab, lab, c.loc[b == lab, "pnl"]) for lab in labels], title, sub,
+                                  unit="trades", height=340)
 
         parts.append(bucket_chart("f_dte", "dte", [-1, 0, 2, 7, 14, 30, 60, 10_000],
                                   ["0DTE", "1–2", "3–7", "8–14", "15–30", "31–60", "60+"],
-                                  "P&L by days-to-expiration at entry"))
+                                  "P&L by days-to-expiration at entry", open_note))
         parts.append(bucket_chart("f_holdopt", "hold_days", [-1, 1 / 24, 1, 3, 7, 21, 10_000],
-                                  ["<1h", "1h–1d", "1–3d", "3–7d", "1–3w", "3w+"], "P&L by time in trade"))
+                                  ["<1h", "1h–1d", "1–3d", "3–7d", "1–3w", "3w+"], "P&L by time in trade",
+                                  "Open strategies count the time held so far."))
 
-        side = c.assign(kind=np.where(c["rights"] == "C", "Calls", np.where(c["rights"] == "P", "Puts", "Calls + puts")))
-        g1 = side.groupby("kind")["pnl"].agg(["sum", "count"])
-        g2 = c.groupby("premium_side")["pnl"].agg(["sum", "count"])
-        data = [{"type": "bar", "x": g1.index.tolist(), "y": g1["sum"].round(2).tolist(),
-                 "marker": {"color": [_pn(v) for v in g1["sum"]]}, "name": "By right", "showlegend": False,
-                 "text": [f"n={n}" for n in g1["count"]], "textposition": "outside", "cliponaxis": False},
-                {"type": "bar", "x": [f"{k} trades" for k in g2.index], "y": g2["sum"].round(2).tolist(),
-                 "marker": {"color": [_pn(v) for v in g2["sum"]]}, "name": "By premium", "showlegend": False,
-                 "text": [f"n={n}" for n in g2["count"]], "textposition": "outside", "cliponaxis": False}]
-        parts.append(self.fig("f_cp", data, {"yaxis": {"tickprefix": "$"}, "bargap": 0.35}, 280,
-                              title="Calls vs. puts · debit vs. credit"))
+        kind = np.where(c["rights"] == "C", "Calls", np.where(c["rights"] == "P", "Puts", "Calls + puts"))
+        cp = [(k, k, c.loc[kind == k, "pnl"]) for k in ("Calls", "Puts", "Calls + puts") if (kind == k).any()]
+        cp += [(f"{k} trades", f"{k} trades", c.loc[c["premium_side"] == k, "pnl"])
+               for k in ("Debit", "Credit") if (c["premium_side"] == k).any()]
+        parts.append(self._dist_fig("f_cp", cp, "Calls vs. puts · debit vs. credit", open_note, unit="trades",
+                                    height=340))
 
-        oc = c.groupby("outcome")["pnl"].agg(["sum", "count"]).sort_values("count", ascending=False)
-        data = [{"type": "bar", "x": oc.index.tolist(), "y": oc["count"].tolist(), "marker": {"color": S1},
-                 "customdata": oc["sum"].round(2).tolist(), "showlegend": False,
-                 "hovertemplate": "%{x}: %{y} strategies<br>P&L %{customdata:$,.2f}<extra></extra>",
-                 "text": [money(v, True, 0) for v in oc["sum"]], "textposition": "outside", "cliponaxis": False}]
-        parts.append(self.fig("f_outcome", data, {"yaxis": {"title": {"text": "Strategies"}}, "bargap": 0.35}, 280,
-                              title="How positions ended", subtitle="Bar height = count; label = total P&L."))
+        oc = c["outcome"].value_counts()
+        parts.append(self._dist_fig("f_outcome", [(k, k, c.loc[c["outcome"] == k, "pnl"]) for k in oc.index],
+                                    "How positions ended", unit="trades", height=340))
 
         ou = c.groupby("underlying")["pnl"].sum().sort_values()
-        data = [{"type": "bar", "orientation": "h", "y": ou.index.tolist(), "x": ou.round(2).tolist(),
-                 "marker": {"color": [_pn(v) for v in ou]}, "showlegend": False,
-                 "hovertemplate": "%{y}: %{x:$,.2f}<extra></extra>"}]
-        parts.append(self.fig("f_optund", data, {"xaxis": {"tickprefix": "$"}, "margin": {"l": 70}},
-                              max(260, 22 * len(ou) + 60), title="Options P&L by underlying"))
+        parts.append(self._dist_fig("f_optund", [(k, k, c.loc[c["underlying"] == k, "pnl"]) for k in ou.index],
+                                    "Options P&L by underlying", open_note, horizontal=True, unit="trades"))
 
         rr = done["ror"].dropna()
         if len(rr) > 2:
