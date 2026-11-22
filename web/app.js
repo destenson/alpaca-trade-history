@@ -342,9 +342,10 @@ async function fetchBundle(creds, benchmarks) {
   const prices = missing.length ? await api.latestPrices(missing) : {};
   // after-hours / overnight prints and the market clock, for re-pricing orders when the market is closed
   let clock = null, stock_snapshots = {};
-  if (orderUnds.length) {
-    const unds = [...new Set(orderUnds)].sort();
-    step('Checking after-hours and overnight prices for order underlyings…');
+  const rpUnds = [...new Set([...orderUnds, ...openOpts.map((s) => OCC.exec(s)[1])])].sort();
+  if (rpUnds.length) {
+    const unds = rpUnds;
+    step('Checking after-hours and overnight prices for option underlyings…');
     try { clock = await api.clock(); } catch (_) { clock = null; }
     stock_snapshots = { default: await api.stockSnapshots(unds) };
     const night = await api.stockSnapshots(unds, 'overnight');

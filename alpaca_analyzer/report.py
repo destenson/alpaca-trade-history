@@ -129,6 +129,14 @@ class Report:
     # -- render -------------------------------------------------------------
     def to_html(self, inline_js: str | None = None) -> str:
         self.build()
+        if getattr(self, "rp_views", None):
+            m = self._market
+            when = _when(m)
+            payload = {"r": RP.R, "when": when, "is_open": m.is_open, "views": self.rp_views,
+                       "est_col": "Est. now" if m.is_open else "Est. at open"}
+            sid, title, body = self.sections[-1]
+            self.sections[-1] = (sid, title, body + '<script type="application/json" id="rp-data">'
+                                 + json.dumps(_clean(payload), allow_nan=False).replace("</", "<\\/") + '</script>')
         tpl = TEMPLATE.read_text()
         nav = "".join(f'<a href="#{sid}" data-tab="{sid}">{html.escape(t)}</a>' for sid, t, _ in self.sections)
         body = "".join(f'<section id="{sid}" class="tab"><h2>{html.escape(t)}</h2>{b}</section>'
@@ -154,6 +162,24 @@ class Report:
         return p
 
     # ======================================================================
+    def market(self):
+        """Market state for re-pricing (shared by the Options and Orders tabs); None in the shared view."""
+        if self.share:
+            return None
+        if getattr(self, "_market", None) is None:
+            a = self.a
+            today = datetime.now(NY).date()
+            unds = {o.underlying for o in O.parse_orders(a.bundle.orders) if o.asset == "option"}
+            op = a.open_positions
+            if op is not None and not op.empty:
+                oo = op[(op["asset"] == "option") & (pd.to_datetime(op["expiry"]).dt.date >= today)]
+                unds |= set(oo["underlying"])
+            snaps = a.bundle.option_snapshots
+            self._market = RP.market_state(a.bundle.clock, a.bundle.stock_snapshots, unds, RP.quote_times(snaps),
+                                           {u: _spot_from(a, u, None) for u in unds})
+            self.rp_views = []
+        return self._market
+
     def build(self):
         self._overview()
         self._performance()
@@ -443,32 +469,39 @@ class Report:
                               title="Holding period vs. " + ("return" if self.share else "P&L")))
 
         sy = a.symbols
-        if sy is not None and not sy.empty:
-            s2 = sy.sort_values("total_pnl")
-            data = [{"type": "bar", "orientation": "h", "y": s2.index.tolist(), "x": s2["total_pnl"].round(2).tolist(),
-                     "marker": {"color": [_pn(v) for v in s2["total_pnl"]]}, "showlegend": False,
-                     "customdata": s2[["stock_pnl", "option_pnl", "unrealized", "dividends"]].round(2).values.tolist(),
-                     "hovertemplate": "<b>%{y}</b><br>Total %{x:$,.2f}<br>Stock realized %{customdata[0]:$,.2f}"
-                                      "<br>Options realized %{customdata[1]:$,.2f}<br>Unrealized %{customdata[2]:$,.2f}"
-                                      "<br>Dividends %{customdata[3]:$,.2f}<extra></extra>"}]
+        if sy is not None and not sy.empty and "realized" in sy:
+            # Trades tab = closed positions only: realized P&L of closed lots, no marks, no dividends
+            s2 = sy[sy["trades"] > 0].sort_values("realized")
+            data = [{"type": "bar", "orientation": "h", "y": s2.index.tolist(), "x": s2["realized"].round(2).tolist(),
+                     "marker": {"color": [_pn(v) for v in s2["realized"]]}, "showlegend": False,
+                     "customdata": np.c_[s2["stock_pnl"], s2["option_pnl"], s2["trades"]].round(2).tolist(),
+                     "hovertemplate": "<b>%{y}</b><br>Realized %{x:$,.2f}<br>Stock %{customdata[0]:$,.2f}"
+                                      "<br>Options %{customdata[1]:$,.2f}<br>%{customdata[2]} closed lots"
+                                      "<extra></extra>"}]
+            n_open = int(s2["is_open"].sum())
             parts.append(self.fig("f_bysym", data, {"xaxis": {"tickprefix": "$"}, "margin": {"l": 84}},
-                                  max(300, 22 * len(s2) + 60), title="Total P&L by underlying",
-                                  subtitle=("Realized stock + options + dividends (open positions excluded)."
-                                            if self.share else "Realized stock + options + unrealized + dividends.")))
-            if "bh_pnl" in s2 and s2["bh_pnl"].notna().any():
-                s3 = s2[s2["bh_pnl"].notna()].sort_values("edge_vs_bh")
-                data = [{"type": "bar", "orientation": "h", "name": "Your P&L", "y": s3.index.tolist(),
-                         "x": s3["total_pnl"].round(2).tolist(), "marker": {"color": S1}},
+                                  max(300, 22 * len(s2) + 60), title="Realized P&L by underlying",
+                                  subtitle="Closed lots only (stock + options, fees included). Open positions and "
+                                           "dividends are excluded"
+                                           + ("" if self.share or not n_open else
+                                              f"; {n_open} of these names still have open positions, shown on the "
+                                              "Options and Positions tabs") + "."))
+            if "bhc_pnl" in s2 and s2["bhc_pnl"].notna().any():
+                s3 = s2[s2["bhc_pnl"].notna()].sort_values("edge_closed")
+                data = [{"type": "bar", "orientation": "h", "name": "Your realized P&L", "y": s3.index.tolist(),
+                         "x": s3["realized"].round(2).tolist(), "marker": {"color": S1}},
                         {"type": "bar", "orientation": "h", "name": "Buy & hold P&L", "y": s3.index.tolist(),
-                         "x": s3["bh_pnl"].round(2).tolist(), "marker": {"color": S2},
-                         "customdata": s3[["peak_capital", "bh_return"]].values.tolist(),
-                         "hovertemplate": "%{y}: %{x:$,.2f}<br>%{customdata[0]:$,.0f} held from first trade"
-                                          " (%{customdata[1]:+.1%})<extra>Buy & hold</extra>"}]
+                         "x": s3["bhc_pnl"].round(2).tolist(), "marker": {"color": S2},
+                         "customdata": np.c_[s3["peak_capital"], s3["bhc_return"]].tolist(),
+                         "text": [str(d) for d in s3["bhc_end"]],
+                         "hovertemplate": "%{y}: %{x:$,.2f}<br>%{customdata[0]:$,.0f} held from first trade to "
+                                          "your last exit %{text} (%{customdata[1]:+.1%})<extra>Buy & hold</extra>"}]
                 parts.append(self.fig("f_edge", data, {"barmode": "group", "xaxis": {"tickprefix": "$"},
                                                        "margin": {"l": 84}, "bargap": 0.25},
                                       max(300, 30 * len(s3) + 80), title="Your trading vs. just holding the underlying",
-                                      subtitle="Buy & hold = your peak capital committed to that name, bought on your first "
-                                               "trade date and held to today. Sorted by your edge."))
+                                      subtitle="Names you've fully exited. Buy & hold = your peak capital committed to "
+                                               "that name, bought on your first trade date and sold on your last exit. "
+                                               "Sorted by your edge."))
 
         # timing
         tt = t.assign(wd=t["open_time"].dt.dayofweek, hr=t["open_time"].dt.hour)
@@ -683,8 +716,10 @@ class Report:
         oo = op[(op["asset"] == "option") & (pd.to_datetime(op["expiry"]).dt.date >= today)]
         out = []
         greek_rows = []
+        market = self.market()
         for i, (und, g) in enumerate(oo.groupby("underlying")):
-            spot = _spot_from(a, und, g)
+            mu = market.underlyings.get(und) if market else None
+            spot = (mu.spot if mu and mu.spot else None) or _spot_from(a, und, g)
             for _, r in g.iterrows():
                 snap = a.bundle.option_snapshots.get(r["symbol"], {})
                 iv = snap.get("impliedVolatility")
@@ -718,7 +753,10 @@ class Report:
                                          "Δ shares": lambda v: num(v, 1), "Γ": lambda v: num(v, 2),
                                          "Θ $/day": lambda v: money(v, True), "Vega $/vol-pt": lambda v: money(v, True)},
                                    tid="t_greeks", pnl_cols=("Θ $/day",)) + '</figure>')
-        return "".join(out) + html_g
+        card = self._rp_card(set(oo["underlying"]), "Edit a price or apply an IV change and the estimated value "
+                             "and the dotted curve of every reading for that underlying update, here and on the "
+                             "Orders tab.") if out else ""
+        return card + "".join(out) + html_g
 
     def _readings_card(self, i, und, g, spot, today, shares, share_cost, share_value) -> str:
         """Every way to split this underlying's open legs into recognised strategies."""
@@ -737,6 +775,14 @@ class Report:
         if not rs:
             return ""
         n_legs = len(g)
+        market = self.market()
+        model = None
+        if market is not None and und in market.underlyings:
+            snaps = a.bundle.option_snapshots
+            models = O._models_for(units, snaps, market, und, RP.underlying_ivs(snaps))
+            whole["today"] = O.curve_open(units, models, whole["x"])
+            model = O.model_payload(units, models)
+            est_unreal = float(np.interp(spot, whole["x"], whole["today"]))
         lot_shares = shares - (odd.qty if odd else 0.0)
         stock_note = f" + {lot_shares:g} shares" if lot_shares else ""
         odd_note = (f" {abs(odd.qty):g} odd-lot share{'s' if abs(odd.qty) != 1 else ''} (not a multiple of 100) "
@@ -747,6 +793,9 @@ class Report:
                 f"{money(whole['unrealized'], True)}" +
                 (f" · Δ {num(whole['greeks'].get('delta', 0), 1)} sh · Θ {money(whole['greeks'].get('theta', 0), True)}/day"
                  if whole["greeks"].get("theta") else ""))
+        if model:
+            head += (f'<br><span class="rp-est" id="est_rd_{i}">Estimated at {_when(market)}: unrealized '
+                     f'<b>{money(est_unreal, True)}</b> · value {money(est_unreal + model["cost"], True)}</span>')
         opts, views = [], []
         for j, r in enumerate(rs):
             vid = f"iv_{i}_{j}"
@@ -760,8 +809,18 @@ class Report:
                              "x": grp.curve_x, "y": grp.curve_expiry, "line": {"color": cols[k % 8], "width": 2}})
             data.append({"type": "scatter", "mode": "lines", "name": "Whole position at expiration", "x": whole["x"],
                          "y": whole["expiry"], "line": {"color": "var:ink", "width": 2, "dash": "dash"}})
-            data.append({"type": "scatter", "mode": "lines", "name": "Whole position today", "x": whole["x"],
+            data.append({"type": "scatter", "mode": "lines",
+                         "name": ("Whole position now (est.)" if market.is_open else "Whole position at next open (est.)")
+                         if model else "Whole position today", "x": whole["x"],
                          "y": whole["today"], "line": {"color": NEUTRAL, "width": 2, "dash": "dot"}})
+            if model:
+                data.append({"type": "scatter", "mode": "markers", "name": "Estimated P&L at that price",
+                             "x": [spot], "y": [round(est_unreal, 2)],
+                             "marker": {"color": "var:ink", "size": 9, "symbol": "circle-open", "line": {"width": 2}},
+                             "hovertemplate": "est. P&L %{y:$,.2f}<extra></extra>"})
+                self.rp_views.append({"kind": "pos", "fid": f"f_read_{i}_{j}", "und": und, "x": whole["x"],
+                                      "order": model, "pos": None, "net": 0.0, "um": None, "t_open": len(data) - 2,
+                                      "t_mark": len(data) - 1, "t_comb": None, "est": f"est_rd_{i}", "rows": []})
             shapes = [{"type": "line", "x0": spot, "x1": spot, "yref": "paper", "y0": 0, "y1": 1,
                        "line": {"color": "var:muted", "width": 1, "dash": "dot"}},
                       {"type": "line", "xref": "paper", "x0": 0, "x1": 1, "y0": 0, "y1": 0,
@@ -813,9 +872,7 @@ class Report:
         today = datetime.now(NY).date()
         spot = lambda und: _spot_from(a, und, None)  # noqa: E731
         snaps = a.bundle.option_snapshots
-        unds = {o.underlying for o in allo if o.asset == "option"}
-        market = RP.market_state(a.bundle.clock, a.bundle.stock_snapshots, unds, RP.quote_times(snaps),
-                                 {u: spot(u) for u in unds})
+        market = self.market()
         O.evaluate(allo, a.ledger, a.open_positions, snaps, spot, today, market=market)
         opening = [o for o in allo if o.asset == "option" and o.effect != "close"]
         skipped_close = sum(o.asset == "option" and o.effect == "close" for o in allo)
@@ -832,8 +889,7 @@ class Report:
             return
         opening.sort(key=lambda o: (o.expiry or date.max, o.underlying, (o.submitted.timestamp() if o.submitted else 0)))
         priced = [o for o in opening if o.curves]
-        val = market.valuation.astimezone(NY)
-        when = "now" if market.is_open else f"the next open ({val:%a %b} {val.day}, {_clock(val)} ET)"
+        when = _when(market)
 
         def px(v, est=False):
             if v is None or (isinstance(v, float) and math.isnan(v)):
@@ -893,44 +949,10 @@ class Report:
         parts = [self.tiles(tiles)]
 
         # ---- repricing inputs
-        rows_html = []
-        for und in sorted({o.underlying for o in priced}, key=lambda u: -abs(market.underlyings[u].move)
-                          if u in market.underlyings else 0):
-            u = market.underlyings.get(und)
-            if not u or not u.spot:
-                continue
-            lt = (f"${u.last:,.2f} · {u.last_size:,.0f} sh · {u.last_time.astimezone(NY):%a} {_clock(u.last_time.astimezone(NY))}"
-                  + (f" ({u.last_feed})" if u.last_feed not in ("", "primary") else "")
-                  + (" · after hours" if u.last_ext else "")) if u.last and u.last_time else "–"
-            qt = f"{u.quote_time.astimezone(NY):%a} {_clock(u.quote_time.astimezone(NY))}" if u.quote_time else "–"
-            rows_html.append(
-                f'<tr class="{"stale" if u.stale else ""}" data-und="{html.escape(und)}">'
-                f'<td><b>{html.escape(und)}</b></td><td>{money(u.ref)}</td><td>{lt}</td>'
-                f'<td class="rp-move">{pct(u.move, True)}</td><td>{qt}</td>'
-                f'<td><input class="rp-spot" type="number" inputmode="decimal" min="0" step="any" '
-                f'value="{round(u.spot, 4):g}" data-default="{round(u.spot, 4):g}" data-ref="{u.ref or u.spot:.6f}" '
-                f'aria-label="{html.escape(und)} price for estimates"></td>'
-                f'<td><input class="rp-iv" type="number" inputmode="decimal" step="5" min="-90" max="300" value="0" '
-                f'aria-label="{html.escape(und)} IV change in percent"> %</td>'
-                f'<td><button type="button" class="rp-reset">Reset</button></td></tr>')
-        if rows_html:
-            status = ("The market is open: option quotes are live, so the inputs are what-ifs." if market.is_open else
-                      f"The market is closed. Option quotes are from the last session; the underlying keeps trading "
-                      f"after hours and overnight. Estimates are for {when}.")
-            parts.append(
-                '<figure class="card wide"><h3>Re-pricing: underlying moves since the option quotes</h3>'
-                f'<p class="sub">{status} Rows with a move of {RP.STALE_MOVE:.0%} or more are highlighted. Edit a price '
-                'or apply an IV change (e.g. −30 for an earnings vol crush) and every estimate, table cell and chart '
-                'for that underlying updates.</p>'
-                '<div class="tablewrap"><table class="rp-table"><thead><tr><th>Underlying</th><th>Quotes reflect</th>'
-                '<th>Latest trade</th><th>Move</th><th>Options quoted</th><th>Price for estimates</th><th>IV change</th>'
-                '<th></th></tr></thead><tbody>' + "".join(rows_html) + '</tbody></table></div>'
-                '<p class="note">How the estimate works: each leg\'s implied vol is backed out of its own quoted mid at '
-                'the price the quotes reflect (one-sided or very wide quotes fall back to Alpaca\'s IV), then the leg is '
-                f're-priced with Black-Scholes at the new price and the time left at {when}, so weekend time decay '
-                'counts. Each strike keeps its own IV (sticky strike) unless you change it. Single after-hours prints can '
-                'be far from where the stock opens: check the size and time. European pricing, r = 4%, no dividends.'
-                '</p></figure>')
+        parts.append(self._rp_card({o.underlying for o in priced},
+                                   "Edit a price or apply an IV change (e.g. −30 for an earnings vol crush) and every "
+                                   "estimate, table cell and chart for that underlying updates, here and on the "
+                                   "Options tab."))
 
         # ---- risk / reward overview
         if priced:
@@ -990,7 +1012,8 @@ class Report:
                          tid="t_orders", pnl_cols=("Edge vs mid", "Edge vs est.")) + '</figure>')
 
         # ---- payoff explorer
-        opts, views, rp_views = [], [], []
+        opts, views = [], []
+        rp_views = self.rp_views
         groups: dict[str, list] = {}
         for o in priced:
             groups.setdefault(o.underlying, []).append(o)
@@ -1082,7 +1105,7 @@ class Report:
                 "annotations": [{"x": sp, "yref": "paper", "y": 1, "text": f"{spot_lbl} ${sp:,.2f}", "showarrow": False,
                                  "yanchor": "bottom", "font": {"size": 11}}]}, 380)
             if model:
-                rp_views.append({"fid": f"f_ord_{j}", "und": und, "x": cur["x"], "order": model["order"],
+                rp_views.append({"kind": "order", "fid": f"f_ord_{j}", "und": und, "x": cur["x"], "order": model["order"],
                                  "pos": model.get("pos") if t_comb is not None else None, "net": net_total, "um": um,
                                  "t_open": 1, "t_mark": t_mark, "t_comb": t_comb, "est": f"est_{vid}", "rows": rows_k})
             if und != group_open:
@@ -1101,13 +1124,51 @@ class Report:
                          f'intrinsic (later-dated legs of calendars/diagonals are approximated). The dotted curve is the '
                          f'estimated value at {when} from the re-pricing inputs. Where you already hold the underlying '
                          f'or options on it, the dashed line shows the whole position after the fill.</p></figure>')
-        if rp_views:
-            payload = {"r": RP.R, "when": when, "is_open": market.is_open, "views": rp_views,
-                       "est_col": "Est. now" if market.is_open else "Est. at open"}
-            parts.append('<script type="application/json" id="rp-data">'
-                         + json.dumps(_clean(payload), allow_nan=False).replace("</", "<\\/") + '</script>')
         parts.append(skip_note)
         self.section("orders", "Orders", "".join(parts))
+
+    def _rp_card(self, unds, how: str) -> str:
+        """Per-underlying re-pricing inputs. Rows for the same underlying stay in sync across tabs."""
+        market = self.market()
+        if market is None:
+            return ""
+        rows_html = []
+        for und in sorted(unds, key=lambda u: -abs(market.underlyings[u].move) if u in market.underlyings else 0):
+            u = market.underlyings.get(und)
+            if not u or not u.spot:
+                continue
+            lt = (f"${u.last:,.2f} · {u.last_size:,.0f} sh · {u.last_time.astimezone(NY):%a} "
+                  f"{_clock(u.last_time.astimezone(NY))}"
+                  + (f" ({u.last_feed})" if u.last_feed not in ("", "primary") else "")
+                  + (" · after hours" if u.last_ext else "")) if u.last and u.last_time else "–"
+            qt = f"{u.quote_time.astimezone(NY):%a} {_clock(u.quote_time.astimezone(NY))}" if u.quote_time else "–"
+            rows_html.append(
+                f'<tr class="{"stale" if u.stale else ""}" data-und="{html.escape(und)}">'
+                f'<td><b>{html.escape(und)}</b></td><td>{money(u.ref)}</td><td>{lt}</td>'
+                f'<td class="rp-move">{pct(u.move, True)}</td><td>{qt}</td>'
+                f'<td><input class="rp-spot" type="number" inputmode="decimal" min="0" step="any" '
+                f'value="{round(u.spot, 4):g}" data-default="{round(u.spot, 4):g}" data-ref="{u.ref or u.spot:.6f}" '
+                f'aria-label="{html.escape(und)} price for estimates"></td>'
+                f'<td><input class="rp-iv" type="number" inputmode="decimal" step="5" min="-90" max="300" value="0" '
+                f'aria-label="{html.escape(und)} IV change in percent"> %</td>'
+                f'<td><button type="button" class="rp-reset">Reset</button></td></tr>')
+        if not rows_html:
+            return ""
+        when = _when(market)
+        status = ("The market is open: option quotes are live, so the inputs are what-ifs." if market.is_open else
+                  f"The market is closed. Option quotes are from the last session; the underlying keeps trading "
+                  f"after hours and overnight. Estimates are for {when}.")
+        return ('<figure class="card wide"><h3>Re-pricing: underlying moves since the option quotes</h3>'
+                f'<p class="sub">{status} Rows with a move of {RP.STALE_MOVE:.0%} or more are highlighted. {how}</p>'
+                '<div class="tablewrap"><table class="rp-table"><thead><tr><th>Underlying</th><th>Quotes reflect</th>'
+                '<th>Latest trade</th><th>Move</th><th>Options quoted</th><th>Price for estimates</th><th>IV change</th>'
+                '<th></th></tr></thead><tbody>' + "".join(rows_html) + '</tbody></table></div>'
+                '<p class="note">How the estimate works: each leg\'s implied vol is backed out of its own quoted mid at '
+                'the price the quotes reflect (one-sided or very wide quotes fall back to Alpaca\'s IV), then the leg is '
+                f're-priced with Black-Scholes at the new price and the time left at {when}, counted in trading days '
+                '(weekends and market holidays don\'t decay). Each strike keeps its own IV (sticky strike) unless you '
+                'change it. Single after-hours prints can be far from where the stock opens: check the size and time. '
+                'European pricing, r = 4%, no dividends.</p></figure>')
 
     # ------------------------------------------------------------ positions
     def _positions(self):
@@ -1247,6 +1308,13 @@ def _nice_bins(s: pd.Series, target: int = 24):
     edges = np.arange(start, hi + step, step)
     # keep zero on an edge so wins and losses never share a bar
     return edges if len(edges) > 1 else np.array([lo - 1, hi + 1])
+
+
+def _when(market) -> str:
+    if market.is_open:
+        return "now"
+    v = market.valuation.astimezone(NY)
+    return f"the next open ({v:%a %b} {v.day}, {_clock(v)} ET)"
 
 
 def _clock(d) -> str:

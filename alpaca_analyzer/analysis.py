@@ -159,6 +159,9 @@ def _combos(ledger: Ledger, trades: pd.DataFrame, open_pos: pd.DataFrame, bundle
     if not ledger.combos:
         return pd.DataFrame()
     t = ledger.closed_df()
+    if "combo_id" not in t:     # nothing closed yet (e.g. a new account with only open strategies)
+        t = pd.DataFrame({"combo_id": pd.Series(dtype=float), "pnl": pd.Series(dtype=float),
+                          "close_time": pd.Series(dtype="datetime64[ns, UTC]"), "close_kind": pd.Series(dtype=object)})
     t = t[t["combo_id"].notna()]
     by = t.groupby("combo_id")
     realized = by["pnl"].sum()
@@ -228,7 +231,8 @@ def _combos(ledger: Ledger, trades: pd.DataFrame, open_pos: pd.DataFrame, bundle
             "rights": "".join(sorted({parse_occ(s).right for s in legs})),
         })
     df = pd.DataFrame(rows)
-    df["hold_days"] = (pd.to_datetime(df["close_time"]) - df["open_time"]).dt.total_seconds() / 86400
+    df["hold_days"] = (pd.to_datetime(df["close_time"], utc=True)
+                       - pd.to_datetime(df["open_time"], utc=True)).dt.total_seconds() / 86400
     df["ror"] = df["pnl"] / df["max_risk"].where(df["max_risk"] > 0)
     # campaigns: follow roll chains to their root
     root = {}
@@ -341,6 +345,11 @@ def _symbol_scorecard(a: Analysis, marks: dict[str, float]) -> pd.DataFrame:
         df["unrealized"] = 0.0
     df["dividends"] = pd.Series(income).reindex(df.index).fillna(0.0)
     df["total_pnl"] = df[["stock_pnl", "option_pnl", "unrealized", "dividends"]].sum(axis=1)
+    df["realized"] = df["stock_pnl"] + df["option_pnl"]            # closed lots only
+    open_unds = set(op["underlying"]) if not op.empty else set()
+    df["is_open"] = df.index.isin(list(open_unds))
+    last_close = t.groupby("underlying")["close_time"].max().map(
+        lambda ts: pd.Timestamp(ts).tz_convert(NY).date() if pd.Timestamp(ts).tzinfo else pd.Timestamp(ts).date())
 
     # ---- buy & hold comparison: hold the underlying with the same peak capital, first entry -> now
     allf = a.ledger.closed_df()
@@ -367,12 +376,27 @@ def _symbol_scorecard(a: Analysis, marks: dict[str, float]) -> pd.DataFrame:
         p1 = marks.get(und)
         cap = peak_capital.get(und, 0.0)
         if p0 and p1 and cap:
-            bh_rows[und] = {"bh_start": d0, "bh_p0": p0, "bh_p1": p1, "peak_capital": cap,
-                            "bh_return": p1 / p0 - 1, "bh_pnl": cap * (p1 / p0 - 1)}
+            bh_rows.setdefault(und, {}).update({"bh_start": d0, "bh_p0": p0, "bh_p1": p1, "peak_capital": cap,
+                            "bh_return": p1 / p0 - 1, "bh_pnl": cap * (p1 / p0 - 1)})
+        # closed-only view (Trades tab): names fully exited, held from first trade to the last exit
+        if und not in open_unds and und in last_close.index and p0 and cap:
+            d1 = last_close[und]
+            p1c = None
+            if closes is not None and len(closes[closes.index <= d1]):
+                p1c = float(closes[closes.index <= d1].iloc[-1])
+            else:   # no bars: the last exit was a share sale -> that day's price is known
+                st = t[(t["underlying"] == und) & (t["asset"] == "stock")].sort_values("close_time")
+                if len(st) and st["close_time"].iloc[-1].tz_convert(NY).date() == d1:
+                    p1c = float(st["close_price"].iloc[-1])
+            if p1c:
+                bh_rows.setdefault(und, {}).update(bhc_end=d1, bhc_return=p1c / p0 - 1,
+                                                   bhc_pnl=cap * (p1c / p0 - 1), peak_capital=cap)
     bh = pd.DataFrame.from_dict(bh_rows, orient="index")
     df = df.join(bh)
     if "bh_pnl" in df:
         df["edge_vs_bh"] = df["total_pnl"] - df["bh_pnl"]
+    if "bhc_pnl" in df:
+        df["edge_closed"] = df["realized"] - df["bhc_pnl"]
     return df.sort_values("total_pnl")
 
 

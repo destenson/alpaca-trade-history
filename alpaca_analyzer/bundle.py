@@ -171,11 +171,12 @@ def fetch_bundle(client, start: str | None = None, benchmarks: list[str] | None 
     need = sorted((unds - set(b.bars)) | o_unds)
     if need:
         b.prices = client.latest_prices([s for s in need if s.isalpha() or "." in s])
-    if o_unds:
-        log("Fetching latest prints for order underlyings (primary + overnight feeds) ...")
+    rp_unds = sorted(o_unds | {underlying_of(s) for s in open_opts})   # re-priced on the Options/Orders tabs
+    if rp_unds:
+        log("Fetching latest prints for option underlyings (primary + overnight feeds) ...")
         b.clock = client.clock()
-        b.stock_snapshots = {"default": client.stock_snapshots(sorted(o_unds), feed=feed)}
-        night = client.stock_snapshots(sorted(o_unds), feed="overnight")   # empty without a subscription
+        b.stock_snapshots = {"default": client.stock_snapshots(rp_unds, feed=feed)}
+        night = client.stock_snapshots(rp_unds, feed="overnight")   # empty without a subscription
         if night:
             b.stock_snapshots["overnight"] = night
     return b

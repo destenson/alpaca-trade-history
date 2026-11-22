@@ -232,7 +232,7 @@ document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('
     td.textContent = text; td.dataset.v = String(v);
     if (pn) { td.classList.toggle('pos', v > 0); td.classList.toggle('neg', v < 0); }
   }
-  function update(tr) {
+  function update(tr, rowOnly) {
     const und = tr.dataset.und;
     const sIn = tr.querySelector('.rp-spot'), vIn = tr.querySelector('.rp-iv');
     const S = parseFloat(sIn.value), shift = (parseFloat(vIn.value) || 0) / 100;
@@ -243,6 +243,7 @@ document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('
     mv.textContent = (move < 0 ? '−' : move > 0 ? '+' : '') + Math.abs(move * 100).toFixed(1) + '%';
     tr.classList.toggle('stale', Math.abs(move) >= 0.02);
     tr.classList.toggle('edited', sIn.value !== sIn.dataset.default || (parseFloat(vIn.value) || 0) !== 0);
+    if (rowOnly) return;
     for (const v of RP.views) {
       if (v.und !== und) continue;
       const spec = FIGS[v.fid];
@@ -255,7 +256,12 @@ document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('
       spec.layout.annotations[0].text = (Math.abs(move) >= 0.02 ? 'estimate at $' : 'spot $') + S.toFixed(2);
       const estTotal = at + v.order.cost;            // model value of the legs, $ (+ debit)
       const el = document.getElementById(v.est);
-      if (el) {
+      if (el && v.kind === 'pos') {
+        el.innerHTML = '';
+        const b = document.createElement('b');
+        b.textContent = signed(at);
+        el.append(`Estimated at ${RP.when}: unrealized `, b, ` · value ${signed(estTotal)}`);
+      } else if (el) {
         const head = `Estimated value at ${RP.when}: `;
         el.innerHTML = '';
         el.append(head);
@@ -278,11 +284,21 @@ document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('
       if (plot && plot.offsetParent !== null) draw(v.fid);
     }
   }
+  // the same underlying can appear on the Options and Orders tabs: keep those rows in sync
+  function sync(src) {
+    const und = src.dataset.und, s = src.querySelector('.rp-spot').value, iv = src.querySelector('.rp-iv').value;
+    document.querySelectorAll('.rp-table tbody tr').forEach((tr) => {
+      if (tr === src || tr.dataset.und !== und) return;
+      tr.querySelector('.rp-spot').value = s; tr.querySelector('.rp-iv').value = iv;
+      update(tr, true);
+    });
+    update(src);
+  }
   document.querySelectorAll('.rp-table tbody tr').forEach((tr) => {
-    tr.querySelectorAll('input').forEach((i) => i.addEventListener('input', () => update(tr)));
+    tr.querySelectorAll('input').forEach((i) => i.addEventListener('input', () => sync(tr)));
     tr.querySelector('.rp-reset').addEventListener('click', () => {
       const sIn = tr.querySelector('.rp-spot');
-      sIn.value = sIn.dataset.default; tr.querySelector('.rp-iv').value = '0'; update(tr);
+      sIn.value = sIn.dataset.default; tr.querySelector('.rp-iv').value = '0'; sync(tr);
     });
   });
 })();

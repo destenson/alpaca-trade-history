@@ -114,3 +114,42 @@ def test_trading_day_clock_skips_weekends_and_holidays():
     assert date(2027, 6, 18) in RP.nyse_holidays(2027)       # Juneteenth on a Saturday -> Friday
     assert date(2027, 12, 31) not in RP.nyse_holidays(2027)  # New Year 2028 is a Saturday: no make-up day
     assert RP._next_open(datetime(2026, 11, 25, 17, 0, tzinfo=NY)).date() == date(2026, 11, 27)
+
+
+def test_open_position_card_is_repriced():
+    b = _bundle()
+    b.orders = []
+    sym_l, sym_s = "ZS261127C00220000", "ZS261127C00225000"
+    b.activities += [
+        {"activity_type": "FILL", "transaction_time": "2026-11-20T15:00:00Z", "symbol": sym_l, "side": "buy",
+         "qty": "1", "price": "1.00", "order_id": "o1"},
+        {"activity_type": "FILL", "transaction_time": "2026-11-20T15:00:00Z", "symbol": sym_s, "side": "sell",
+         "qty": "1", "price": "0.60", "order_id": "o1"}]
+    b.positions = [{"symbol": s, "asset_class": "us_option", "qty": q, "avg_entry_price": p, "current_price": m,
+                    "market_value": str(float(q) * float(m) * 100), "cost_basis": str(float(q) * float(p) * 100),
+                    "unrealized_pl": "0"} for s, q, p, m in ((sym_l, "1", "1.00", "0.95"), (sym_s, "-1", "0.60", "0.62"))]
+    out = Report(analysis.run(b)).to_html()
+    assert 'id="est_rd_0"' in out and "Whole position at next open (est.)" in out
+    import json, re
+    payload = json.loads(re.search(r'id="rp-data">(.*?)</script>', out).group(1).replace("<\\/", "</"))
+    assert any(v["kind"] == "pos" and v["und"] == "ZS" for v in payload["views"])
+
+
+def test_trades_tab_is_closed_positions_only():
+    acts = [{"activity_type": "CSD", "date": "2026-01-05", "net_amount": "10000"},
+            {"activity_type": "FILL", "transaction_time": "2026-01-06T15:00:00Z", "symbol": "AAA", "side": "buy",
+             "qty": "10", "price": "10"},
+            {"activity_type": "FILL", "transaction_time": "2026-01-08T15:00:00Z", "symbol": "AAA", "side": "sell",
+             "qty": "10", "price": "12"},
+            {"activity_type": "FILL", "transaction_time": "2026-01-07T15:00:00Z", "symbol": "BBB", "side": "buy",
+             "qty": "10", "price": "50"}]
+    b = Bundle(activities=acts, positions=[{"symbol": "BBB", "asset_class": "us_equity", "qty": "10",
+                                            "avg_entry_price": "50", "current_price": "80", "market_value": "800",
+                                            "cost_basis": "500", "unrealized_pl": "300"}])
+    a = analysis.run(b)
+    assert a.symbols.loc["AAA", "realized"] == pytest.approx(20) and not a.symbols.loc["AAA", "is_open"]
+    r = Report(a)
+    r.to_html()
+    fig = r.figs["f_bysym"]["data"][0]
+    assert fig["y"] == ["AAA"] and fig["x"] == [20.0]          # BBB (open, unrealized +300) is not here
+    assert a.symbols.loc["AAA", "bhc_end"] == date(2026, 1, 8)

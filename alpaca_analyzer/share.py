@@ -78,11 +78,12 @@ def make_shareable(a: Analysis, notional: float = 10_000.0) -> Analysis:
     # ---- per-symbol: realized only (unrealized would reveal current holdings)
     sy = a.symbols.copy() if a.symbols is not None else pd.DataFrame()
     if not sy.empty:
-        for col in ("stock_pnl", "option_pnl", "dividends"):
-            sy[col] = sy[col] * k
+        for col in ("stock_pnl", "option_pnl", "dividends", "realized"):
+            if col in sy:
+                sy[col] = sy[col] * k
         sy["unrealized"] = 0.0
         sy["total_pnl"] = sy[["stock_pnl", "option_pnl", "dividends"]].sum(axis=1)
-        sy = sy.drop(columns=[x for x in sy.columns if x.startswith("bh_") or x in ("peak_capital", "edge_vs_bh")])
+        sy = sy.drop(columns=[x for x in sy.columns if x.startswith(("bh_", "bhc_")) or x in ("peak_capital", "edge_vs_bh", "edge_closed")])
         sy = sy[sy["trades"] > 0].sort_values("total_pnl")   # dividend-only names would reveal holdings
     s.symbols = sy
 
