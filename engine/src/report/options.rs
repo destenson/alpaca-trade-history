@@ -476,6 +476,19 @@ impl<'a> Report<'a> {
                 money(est_unreal + mp.cost, true, 2)
             ));
         }
+        let orders = if self.share { Vec::new() } else { O::parse_orders(&a.bundle.orders) };
+        // the option legs of a group, summed per contract (None when it holds shares: no multi-leg order)
+        let legs_of = |units: &[crate::interpret::Unit]| -> Option<Vec<(String, f64)>> {
+            let mut m: BTreeMap<String, f64> = BTreeMap::new();
+            for u in units {
+                if u.symbol == crate::interpret::STOCK {
+                    return None;
+                }
+                *m.entry(u.symbol.clone()).or_insert(0.0) += u.qty;
+            }
+            let v: Vec<(String, f64)> = m.into_iter().filter(|x| x.1.abs() > 1e-9).collect();
+            (!v.is_empty()).then_some(v)
+        };
         let mut opts = Vec::new();
         let mut views = Vec::new();
         for (j, r) in rs.iter().enumerate() {
@@ -506,6 +519,48 @@ impl<'a> Report<'a> {
                 self.rp_views.push(json!({"kind": "pos", "fid": fid, "und": und, "x": super::jraw(&whole.x), "order": mp.to_json(), "pos": Value::Null, "net": 0.0, "um": Value::Null,
                     "t_open": data.len() - 2, "t_mark": data.len() - 1, "t_comb": Value::Null, "est": format!("est_rd_{}", i), "rows": []}));
             }
+            // open closing orders: the P&L they lock in, and where today's value curve reaches it
+            if !self.share {
+                let mut seen: Vec<String> = Vec::new();
+                let mut cands: Vec<(Vec<(String, f64)>, f64, &[f64], &[f64], String)> = Vec::new();
+                if let Some(l) = legs_of(&units) {
+                    cands.push((l, whole_cost(&units), &whole.x, &whole.today, "whole position".into()));
+                }
+                for grp in &r.groups {
+                    if let Some(l) = legs_of(&grp.units) {
+                        cands.push((l, grp.cost, &grp.curve_x, &grp.curve_today, grp.strategy.clone()));
+                    }
+                }
+                for (l, basis, xs, now, what) in cands {
+                    let (id, _, fill) = closer(&l, basis, f64::NAN, &orders, "0");
+                    let Some((pnl, net)) = fill else { continue };
+                    if seen.contains(&id) {
+                        continue;
+                    }
+                    seen.push(id);
+                    let x0 = *whole.x.first().unwrap_or(&0.0);
+                    let x1 = *whole.x.last().unwrap_or(&0.0);
+                    let price = format!("${:.2} {}", net.abs(), if net < 0.0 { "credit" } else { "debit" });
+                    data.push(json!({"type": "scatter", "mode": "lines", "name": format!("Closing order ({}) at {}: {} if filled", what, price, money(pnl, true, 2)),
+                        "x": [jf(x0), jf(x1)], "y": [jr(pnl, 2), jr(pnl, 2)], "line": {"color": "var:series-6", "width": 2, "dash": "dashdot"},
+                        "hovertemplate": format!("closing order at {}: %{{y:$,.2f}}<extra></extra>", price)}));
+                    // crossings of today's value curve with that P&L: roughly where the order would fill now
+                    let mut cx = Vec::new();
+                    if xs.len() == now.len() {
+                        for k in 1..xs.len() {
+                            let (a0, a1) = (now[k - 1] - pnl, now[k] - pnl);
+                            if a0.is_finite() && a1.is_finite() && (a0 == 0.0 || (a0 < 0.0) != (a1 < 0.0)) {
+                                cx.push(xs[k - 1] + (xs[k] - xs[k - 1]) * if a1 != a0 { -a0 / (a1 - a0) } else { 0.0 });
+                            }
+                        }
+                    }
+                    if !cx.is_empty() {
+                        data.push(json!({"type": "scatter", "mode": "markers", "name": "Fills about here today (est.)", "x": cx.iter().map(|v| jr(*v, 2)).collect::<Vec<_>>(),
+                            "y": cx.iter().map(|_| jr(pnl, 2)).collect::<Vec<_>>(), "marker": {"color": "var:series-6", "size": 10, "symbol": "diamond"},
+                            "hovertemplate": format!("{} at %{{x:$,.2f}}: closing order at {} fills (est.)<extra></extra>", und, price)}));
+                    }
+                }
+            }
             let shapes = json!([{"type": "line", "x0": spot, "x1": spot, "yref": "paper", "y0": 0, "y1": 1, "line": {"color": "var:muted", "width": 1, "dash": "dot"}},
                                 {"type": "line", "xref": "paper", "x0": 0, "x1": 1, "y0": 0, "y1": 0, "line": {"color": "var:axis", "width": 1}}]);
             let fig = self.fig(&fid, data, json!({"shapes": shapes, "hovermode": "x unified", "showlegend": true,
@@ -527,7 +582,13 @@ impl<'a> Report<'a> {
                     Cell::s(grp.legs_label()),
                     Cell::F(grp.cost),
                     Cell::F(grp.value),
-                    Cell::F(grp.unrealized()),
+                    match legs_of(&grp.units).filter(|_| !self.share) {
+                        Some(l) => {
+                            let (id, refs, _) = closer(&l, grp.cost, grp.value, &orders, &format!("{}{}", i, j));
+                            Cell::OrderF(grp.unrealized(), id, refs)
+                        }
+                        None => Cell::F(grp.unrealized()),
+                    },
                     Cell::F(grp.max_gain),
                     Cell::F(grp.max_loss),
                     Cell::s(if grp.breakevens.is_empty() { "–".to_string() } else { dollars_list(&grp.breakevens) }),
@@ -607,50 +668,63 @@ impl<'a> Report<'a> {
             }
             let basis: f64 = lg.iter().map(|x| x.2).sum();
             let value: f64 = lg.iter().map(|x| x.3).sum();
-            let und = crate::occ::underlying_of(&lg[0].0);
-            let leg_txt = lg.iter().map(|x| format!("{}{} {}", if x.1 > 0.0 { "+" } else { "" }, util::g(x.1), super::leg(&x.0))).collect::<Vec<_>>().join(", ");
-            // an open limit order that closes exactly these legs
-            let exact = orders.iter().find(|o| {
-                o.order_type == "limit"
-                    && o.legs.len() == lg.len()
-                    && o.legs.iter().all(|l| lg.iter().any(|x| x.0 == l.symbol && (l.ratio * o.units + x.1).abs() < 1e-9))
-            });
-            let mut refs = json!({"basis": jr(basis, 2), "label": format!("{} close · {}", und, leg_txt)});
-            if !value.is_nan() {
-                refs["target"] = jr(value - basis, 2);
-            }
-            // closing at the existing order's limit: cash in − the open lots' cost
-            let if_filled = exact.and_then(|o| o.net.map(|n| -n * o.units * 100.0 - basis));
-            let id = match exact {
-                Some(o) => {
-                    refs["scale"] = jf(o.units * 100.0);
-                    o.id.clone()
-                }
-                None => {
-                    // open orders that already close some of these legs: Alpaca may refuse a second one
-                    let overlap: Vec<String> = orders
-                        .iter()
-                        .filter(|o| o.legs.iter().any(|l| lg.iter().any(|x| x.0 == l.symbol && (l.ratio > 0.0) != (x.1 > 0.0))))
-                        .map(|o| format!("{} at {}", o.legs_label(), o.net.map(|n| format!("${:.2} {}", n.abs(), if n < 0.0 { "credit" } else { "debit" })).unwrap_or_else(|| "market".into())))
-                        .collect();
-                    if !overlap.is_empty() {
-                        refs["overlap"] = json!(overlap.join("; "));
-                    }
-                    let q = lg.iter().map(|x| x.1.abs().round() as u64).fold(0, gcd).max(1) as f64;
-                    refs["scale"] = jf(q * 100.0);
-                    refs["new"] = json!({"qty": q, "legs": lg.iter().map(|x| json!({
-                        "symbol": x.0, "side": if x.1 > 0.0 { "sell" } else { "buy" },
-                        "position_intent": if x.1 > 0.0 { "sell_to_close" } else { "buy_to_close" },
-                        "ratio_qty": (x.1.abs() / q).round()})).collect::<Vec<_>>()});
-                    format!("new:{}", cid)
-                }
-            };
+            let qty: Vec<(String, f64)> = lg.iter().map(|x| (x.0.clone(), x.1)).collect();
+            let (id, refs, fill) = closer(&qty, basis, value, &orders, &cid.to_string());
+            let if_filled = fill.map(|f| f.0);
             if !id.is_empty() {
                 out.insert(cid, (id, refs.to_string(), if_filled));
             }
         }
         out
     }
+}
+
+/// What the change-price popup needs to close `legs` (symbol, signed qty) at a chosen profit against
+/// `basis`: the open limit order that closes exactly these legs (to change it), or a new closing order
+/// ("new:<key>", legs reversed). Also, for an existing order, the P&L if it fills and its net price.
+pub fn closer(legs: &[(String, f64)], basis: f64, value: f64, orders: &[O::PendingOrder], key: &str) -> (String, String, Option<(f64, f64)>) {
+    let und = crate::occ::underlying_of(&legs[0].0);
+    let leg_txt = legs.iter().map(|x| format!("{}{} {}", if x.1 > 0.0 { "+" } else { "" }, util::g(x.1), super::leg(&x.0))).collect::<Vec<_>>().join(", ");
+    let exact = orders.iter().find(|o| {
+        o.order_type == "limit"
+            && o.legs.len() == legs.len()
+            && o.legs.iter().all(|l| legs.iter().any(|x| x.0 == l.symbol && (l.ratio * o.units + x.1).abs() < 1e-9))
+    });
+    let mut refs = json!({"basis": jr(basis, 2), "label": format!("{} close · {}", und, leg_txt)});
+    if !value.is_nan() {
+        refs["target"] = jr(value - basis, 2);
+    }
+    let fill = exact.and_then(|o| o.net.map(|n| (-n * o.units * 100.0 - basis, n)));
+    let id = match exact {
+        Some(o) => {
+            refs["scale"] = jf(o.units * 100.0);
+            o.id.clone()
+        }
+        None => {
+            // open orders that already close some of these legs: Alpaca may refuse a second one
+            let overlap: Vec<String> = orders
+                .iter()
+                .filter(|o| o.legs.iter().any(|l| legs.iter().any(|x| x.0 == l.symbol && (l.ratio > 0.0) != (x.1 > 0.0))))
+                .map(|o| format!("{} at {}", o.legs_label(), o.net.map(|n| format!("${:.2} {}", n.abs(), if n < 0.0 { "credit" } else { "debit" })).unwrap_or_else(|| "market".into())))
+                .collect();
+            if !overlap.is_empty() {
+                refs["overlap"] = json!(overlap.join("; "));
+            }
+            let q = legs.iter().map(|x| x.1.abs().round() as u64).fold(0, gcd).max(1) as f64;
+            refs["scale"] = jf(q * 100.0);
+            refs["new"] = json!({"qty": q, "legs": legs.iter().map(|x| json!({
+                "symbol": x.0, "side": if x.1 > 0.0 { "sell" } else { "buy" },
+                "position_intent": if x.1 > 0.0 { "sell_to_close" } else { "buy_to_close" },
+                "ratio_qty": (x.1.abs() / q).round()})).collect::<Vec<_>>()});
+            let k: String = key.chars().filter(|c| c.is_ascii_digit()).take(9).collect();
+            format!("new:{}", if k.is_empty() { "0".into() } else { k })
+        }
+    };
+    (id, refs.to_string(), fill)
+}
+
+fn whole_cost(units: &[crate::interpret::Unit]) -> f64 {
+    units.iter().map(|u| u.cost).sum()
 }
 
 fn gcd(a: u64, b: u64) -> u64 {
