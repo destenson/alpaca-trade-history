@@ -21,6 +21,7 @@ from .interpret import build_units, readings
 from . import orders as O
 from . import reprice as RP
 from .reinvest import reinvest_table
+from .glossary import tip as _tip
 from .optionsmath import payoff_curves
 
 PLOTLY_CDN = "https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"
@@ -96,7 +97,7 @@ class Report:
         """items: (label, value, detail) - detail may contain a delta class marker."""
         out = []
         for label, value, detail in items:
-            out.append(f'<div class="tile"><div class="tl">{html.escape(label)}</div>'
+            out.append(f'<div class="tile"><div class="tl"{_tip_attr(label)}>{html.escape(label)}</div>'
                        f'<div class="tv">{value}</div><div class="td">{detail}</div></div>')
         return f'<div class="tiles">{"".join(out)}</div>'
 
@@ -107,7 +108,7 @@ class Report:
         if df is None or df.empty:
             return '<p class="empty">No rows.</p>'
         rows = df if max_rows is None else df.head(max_rows)
-        th = "".join(f'<th data-k="{i}">{html.escape(str(c))}</th>' for i, c in enumerate(rows.columns))
+        th = "".join(f'<th data-k="{i}"{_tip_attr(str(c))}>{html.escape(str(c))}</th>' for i, c in enumerate(rows.columns))
         body = []
         for _, r in rows.iterrows():
             tds = []
@@ -1294,9 +1295,10 @@ class Report:
                   f"after hours and overnight. Estimates are for {when}.")
         return ('<figure class="card wide"><h3>Re-pricing: underlying moves since the option quotes</h3>'
                 f'<p class="sub">{status} Rows with a move of {RP.STALE_MOVE:.0%} or more are highlighted. {how}</p>'
-                '<div class="tablewrap"><table class="rp-table"><thead><tr><th>Underlying</th><th>Quotes reflect</th>'
-                '<th>Latest trade</th><th>Move</th><th>Options quoted</th><th>Price for estimates</th><th>IV change</th>'
-                '<th></th></tr></thead><tbody>' + "".join(rows_html) + '</tbody></table></div>'
+                '<div class="tablewrap"><table class="rp-table"><thead><tr>'
+                + "".join(f'<th{_tip_attr(h)}>{h}</th>' for h in ("Underlying", "Quotes reflect", "Latest trade", "Move",
+                                                                  "Options quoted", "Price for estimates", "IV change", ""))
+                + '</tr></thead><tbody>' + "".join(rows_html) + '</tbody></table></div>'
                 '<p class="note">How the estimate works: each leg\'s implied vol is backed out of its own quoted mid at '
                 'the price the quotes reflect (one-sided or very wide quotes fall back to Alpaca\'s IV), then the leg is '
                 f're-priced with Black-Scholes at the new price and the time left at {when}, counted in trading days '
@@ -1442,6 +1444,11 @@ def _nice_bins(s: pd.Series, target: int = 24):
     edges = np.arange(start, hi + step, step)
     # keep zero on an edge so wins and losses never share a bar
     return edges if len(edges) > 1 else np.array([lo - 1, hi + 1])
+
+
+def _tip_attr(label: str) -> str:
+    t = _tip(label)
+    return f' data-tip="{html.escape(t)}" tabindex="0"' if t else ""
 
 
 def _when(market) -> str:

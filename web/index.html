@@ -35,19 +35,19 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
       </div>
       <div class="row">
         <fieldset class="seg" aria-label="Account">
-          <label><input type="radio" name="env" value="live" checked> Live</label>
-          <label><input type="radio" name="env" value="paper"> Paper</label>
+          <label title="Your real-money account (api.alpaca.markets)"><input type="radio" name="env" value="live" checked> Live</label>
+          <label title="Alpaca's simulated paper-trading account; needs paper keys"><input type="radio" name="env" value="paper"> Paper</label>
         </fieldset>
         <details class="opts">
           <summary>Options</summary>
           <div class="row two">
-            <label>Benchmarks<input id="bench" value="SPY QQQ" spellcheck="false"></label>
-            <label>Start date (optional)<input id="start" type="date"></label>
+            <label title="Symbols to compare against, bought with the same deposits on the same days (space-separated)">Benchmarks<input id="bench" value="SPY QQQ" spellcheck="false"></label>
+            <label title="Analyze from this date. Default: the start of your funded equity history">Start date (optional)<input id="start" type="date"></label>
           </div>
         </details>
       </div>
       <div class="row">
-        <label class="check"><input type="checkbox" id="remember"> Remember keys on this device</label>
+        <label class="check" title="Store the keys in this browser so you don't retype them; encrypted if you set a passphrase"><input type="checkbox" id="remember"> Remember keys on this device</label>
       </div>
       <div class="row two" id="passrow" hidden>
         <label>Passphrase (recommended)<input id="pass" type="password" autocomplete="new-password"
@@ -57,7 +57,7 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
           AES-GCM encrypted.</p>
       </div>
       <div class="row" id="keeprow" hidden>
-        <label class="check"><input type="checkbox" id="keep" checked> Keep unlocked on this device for 30 days</label>
+        <label class="check" title="Open straight into the report without the passphrase; ends after 30 days without a visit, or with Lock"><input type="checkbox" id="keep" checked> Keep unlocked on this device for 30 days</label>
         <span class="hint">Opens straight into your report without the passphrase; any visit restarts the 30 days.
           Use <b>Lock</b> to end it.</span>
       </div>
@@ -75,7 +75,7 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
   <section class="card" id="unlock" hidden>
     <form id="unlockForm" autocomplete="off" class="row actions">
       <label class="grow">Passphrase for saved keys<input id="unlockPass" type="password" autocomplete="current-password"></label>
-      <label class="check"><input type="checkbox" id="unlockKeep" checked> Keep unlocked on this device for 30 days</label>
+      <label class="check" title="Open straight into the report without the passphrase; ends after 30 days without a visit, or with Lock"><input type="checkbox" id="unlockKeep" checked> Keep unlocked on this device for 30 days</label>
       <button type="submit" class="primary">Unlock &amp; analyze</button>
       <button type="button" id="unlockForget" class="ghost">Forget saved keys</button>
     </form>
@@ -96,8 +96,8 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
       </div>
       <div class="actions">
         <div class="seg" role="tablist">
-          <button type="button" id="viewFull" class="on">Full report</button>
-          <button type="button" id="viewShare">Shareable view</button>
+          <button type="button" id="viewFull" class="on" title="Everything, including dollar amounts and open positions">Full report</button>
+          <button type="button" id="viewShare" title="Safe to publish: returns and stats only, dollars normalized to a $10,000 account, no positions or account details">Shareable view</button>
         </div>
         <button type="button" id="refresh" class="primary" title="Re-download your account data with the keys from this session">Refresh</button>
         <button type="button" id="dlFull" class="ghost">Download full</button>

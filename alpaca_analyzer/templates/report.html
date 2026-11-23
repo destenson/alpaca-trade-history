@@ -81,6 +81,12 @@ td.pos { color: var(--gain-text); } td.neg { color: var(--loss-text); }
   border-radius: 8px; padding: 6px 8px; max-width: 100%; flex: 1 1 auto; }
 .interp-view .tablewrap { max-height: none; margin-bottom: 8px; }
 .rp-table td, .rp-table th { white-space: nowrap; }
+[data-tip] { text-decoration: underline dotted color-mix(in srgb, currentColor 45%, transparent); text-underline-offset: 3px; }
+[data-tip]:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; border-radius: 3px; }
+#tip { position: fixed; z-index: 50; max-width: 300px; padding: 7px 10px; border-radius: 8px; font-size: 12.5px;
+  line-height: 1.4; color: var(--ink); background: var(--surface); border: 1px solid var(--axis);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.18); pointer-events: none; font-weight: 400; text-transform: none; letter-spacing: 0; }
+#tip[hidden] { display: none; }
 .rp-table tr.stale td { background: color-mix(in srgb, var(--series-1) 10%, transparent); }
 .rp-table tr.stale td.rp-move { font-weight: 600; }
 .rp-table input { font: inherit; font-size: 13px; width: 6.5em; padding: 3px 6px; color: var(--ink); background: var(--page);
@@ -302,6 +308,33 @@ document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('
       sIn.value = sIn.dataset.default; tr.querySelector('.rp-iv').value = '0'; sync(tr);
     });
   });
+})();
+// Tooltips: any element with data-tip (table headers, tile labels). A floating box instead of the native
+// title attribute so it isn't clipped by scrolling tables and also works on tap / keyboard focus.
+(function () {
+  const box = document.createElement('div');
+  box.id = 'tip'; box.hidden = true; box.setAttribute('role', 'tooltip');
+  document.body.appendChild(box);
+  let cur = null;
+  function place(el) {
+    box.textContent = el.dataset.tip; box.hidden = false; cur = el;
+    const r = el.getBoundingClientRect(), b = box.getBoundingClientRect();
+    let x = Math.min(Math.max(8, r.left + r.width / 2 - b.width / 2), innerWidth - b.width - 8);
+    let y = r.bottom + 8;
+    if (y + b.height > innerHeight - 8) y = r.top - b.height - 8;
+    box.style.left = x + 'px'; box.style.top = Math.max(8, y) + 'px';
+  }
+  const hide = () => { box.hidden = true; cur = null; };
+  document.addEventListener('pointerover', (e) => { const el = e.target.closest('[data-tip]'); if (el && e.pointerType !== 'touch') place(el); });
+  document.addEventListener('pointerout', (e) => { if (cur && !cur.contains(e.relatedTarget)) hide(); });
+  document.addEventListener('focusin', (e) => { const el = e.target.closest('[data-tip]'); if (el) place(el); });
+  document.addEventListener('focusout', hide);
+  document.addEventListener('pointerdown', (e) => {          // tap to show / tap elsewhere to hide
+    const el = e.target.closest('[data-tip]');
+    if (e.pointerType === 'touch' && el) { if (cur === el) hide(); else place(el); } else if (!el) hide();
+  });
+  addEventListener('scroll', hide, true);
+  addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
 })();
 // sortable tables
 document.querySelectorAll('table.sortable').forEach(t => {
