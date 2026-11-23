@@ -1030,9 +1030,9 @@ function openOrderDialog(d) {
   const lim = +o.limit_price;
   // Alpaca can't change an order in place while it is "accepted" (held until the session opens): cancel it
   // and place the same order at the new price instead, after its own confirmation
-  ordCur = { id: o.id, mleg, qty, lim, und, order: o, recreate: o.status === 'accepted' };
   const ref = d.ref && typeof d.ref === 'object' ? d.ref : {};
   const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  ordCur = { id: o.id, mleg, qty, lim, und, order: o, recreate: o.status === 'accepted', maxloss: num(ref.maxloss) };
   const label = typeof ref.label === 'string' ? ref.label.slice(0, 160) : `${und} · ${legText(o)}`;
   $('ordWhat').textContent = `${label} · ${qty} ${mleg ? (qty === 1 ? 'spread' : 'spreads') : (qty === 1 ? 'contract' : 'contracts')} · ${(o.time_in_force || '').toUpperCase()} · ${o.status}` +
     (lastCreds?.env === 'paper' ? ' · paper account' : ' · LIVE account');
@@ -1070,6 +1070,16 @@ function orderBody(o, nl) {
   }
   return { ...base, symbol: o.symbol, side: o.side, position_intent: o.position_intent };
 }
+// Options buying power an order at limit `p` ties up: the premium for a debit, and at least its max loss
+// (the max loss moves dollar for dollar with the price). null when it can't be told (undefined risk).
+function bpNeed(c, p) {
+  const q = c.qty * 100;
+  const signed = (v) => (c.mleg ? v : (c.order.side === 'sell' ? -v : v));      // debit positive
+  const debit = Math.max(0, signed(p)) * q;
+  if (c.maxloss === null) return signed(p) >= 0 && !c.mleg ? debit : null;
+  const lossAt = c.maxloss - (signed(p) - signed(c.lim)) * q;                   // negative = a loss
+  return Math.max(debit, -Math.min(0, lossAt));
+}
 function newLimit() {
   const v = Number($('ordPx').value);
   if (!Number.isFinite(v) || v < 0 || v > 100000) return null;
@@ -1097,13 +1107,36 @@ $('ordGo').addEventListener('click', async () => {
   const c = ordCur;
   if ($('ordConfirm').hidden) {           // first click: show exactly what will be sent
     if (nl === c.lim) { showOrdErr('That is the current limit.'); return; }
+    // buying power: the old order's share is released when it is replaced or cancelled
+    $('ordGo').disabled = true;
+    let bpNote = '';
+    try {
+      const acct = await new Alpaca(lastCreds).account();
+      const bp = +acct.options_buying_power;
+      const need = bpNeed(c, nl), held = bpNeed(c, c.lim) || 0;
+      if (Number.isFinite(bp) && need !== null) {
+        const avail = bp + held;
+        if (need > avail + 0.005) {
+          showOrdErr(`Not enough options buying power: at ${dc(nl, c.mleg)} this order needs about ${money2(need)}, ` +
+            `and ${money2(avail)} is available (${money2(bp)} free + ${money2(held)} this order holds now). Nothing was sent.`);
+          $('ordGo').disabled = false;
+          return;
+        }
+        bpNote = ` Buying power: needs about ${money2(need)} of ${money2(avail)} available.`;
+      } else if (need === null) {
+        bpNote = ' Buying power for this undefined-risk order can\'t be checked here; Alpaca will decide.';
+      }
+    } catch (e) {
+      bpNote = ' (Could not check buying power: ' + (e.message || e) + ')';
+    }
+    $('ordGo').disabled = false;
     const tot = Math.abs(nl) * c.qty * 100;
     const sideTot = c.mleg ? (nl < 0 ? `receive ${money2(tot)}` : nl > 0 ? `pay ${money2(tot)}` : 'no premium') : `${money2(tot)}`;
     const what = `${dc(c.lim, c.mleg)} → ${dc(nl, c.mleg)} (${c.qty} × 100: ${sideTot} if it fills, before fees)`;
     $('ordConfirm').textContent = c.recreate
       ? `Cancel this order, then place the same order (same legs, quantity and ${(c.order.time_in_force || '').toUpperCase()}) at the new limit: ${what}. ` +
-        'Two separate steps: if Alpaca rejects the new order, you will be left with no order, and this page will say so.'
-      : `Replace the order's limit ${what}. Alpaca cancels the old order and places the new one at once.`;
+        'Two separate steps: if Alpaca rejects the new order, the original order is placed again at its old price.' + bpNote
+      : `Replace the order's limit ${what}. Alpaca cancels the old order and places the new one at once.` + bpNote;
     $('ordConfirm').hidden = false;
     $('ordGo').textContent = c.recreate ? 'Confirm cancel & re-place' : 'Confirm change';
     return;
@@ -1150,6 +1183,13 @@ $('ordGo').addEventListener('click', async () => {
     const res = await api.placeOrder(orderBody(c.order, nl));
     await afterOrderChange(`· ${c.und} order cancelled and placed again at ${dc(nl, c.mleg)} (Alpaca status: ${res?.status || 'sent'})`);
   } catch (e) {
-    await afterOrderChange(`· ${c.und}: the old order was cancelled, but Alpaca rejected the new one (${e.message}). You have no order for it now`, true);
+    // put the original order back at its old price
+    $('ordGo').textContent = 'Restoring…';
+    try {
+      await api.placeOrder(orderBody(c.order, c.lim));
+      await afterOrderChange(`· ${c.und}: Alpaca rejected the new price (${e.message}); the original order was placed again at ${dc(c.lim, c.mleg)}`, true);
+    } catch (e2) {
+      await afterOrderChange(`· ${c.und}: the old order was cancelled, Alpaca rejected the new one (${e.message}) and placing the original again failed too (${e2.message}). You have no order for it now`, true);
+    }
   }
 });
