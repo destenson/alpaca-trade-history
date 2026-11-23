@@ -75,6 +75,23 @@ fn order_cell(o: &PendingOrder, text: String, prefill: Option<f64>) -> Cell {
     Cell::Order(text, o.id.clone(), refs.to_string())
 }
 
+/// For an order that only closes positions: the cost basis of what it closes and the dollars per point of
+/// price (units × multiplier), so the popup can work from a target profit; `profit` opens it on that input.
+fn with_basis(c: Cell, basis: f64, scale: f64, profit: bool) -> Cell {
+    match c {
+        Cell::Order(t, id, refs) => {
+            let mut v: Value = serde_json::from_str(&refs).unwrap_or(json!({}));
+            v["basis"] = jr(basis, 2);
+            v["scale"] = jf(scale);
+            if profit {
+                v["profit"] = json!(true);
+            }
+            Cell::Order(t, id, v.to_string())
+        }
+        c => c,
+    }
+}
+
 fn name(o: &PendingOrder) -> String {
     match o.expiry {
         Some(e) => format!("{} {} {}", o.underlying, o.strategy, e.format("%m/%d")),
@@ -755,17 +772,21 @@ impl<'a> Report<'a> {
                 Some(n) if all_close && !o.net_is_estimate => -n * units * o.mult() - basis,
                 _ => f64::NAN,
             };
+            let wb = |c: Cell, profit: bool| if pnl.is_nan() { c } else { with_basis(c, basis, units * o.mult(), profit) };
             tb.push(vec![
                 Cell::I(k),
                 Cell::s(&o.underlying),
                 Cell::s(o.legs_label()),
                 Cell::s(closes.join(", ")),
                 Cell::s(kind),
-                limit_cell(o),
+                wb(limit_cell(o), false),
                 Cell::s(px(o.mid_now, false)),
-                price_cell(o, o.natural),
+                wb(price_cell(o, o.natural), false),
                 Cell::F(basis),
-                Cell::F(pnl),
+                match wb(limit_cell(o), true) {
+                    Cell::Order(_, id, refs) if !pnl.is_nan() => Cell::OrderF(pnl, id, refs),
+                    _ => Cell::F(pnl),
+                },
             ]);
         }
         if tb.rows.is_empty() {

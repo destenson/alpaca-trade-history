@@ -72,6 +72,8 @@ pub enum Cell {
     Tip(String, String),
     /// an order's limit price: text, order id, reference prices (JSON) for the change-price popup
     Order(String, String, String),
+    /// a number that also opens the order popup (P&L if filled): value, order id, popup JSON
+    OrderF(f64, String, String),
     N,
 }
 
@@ -81,6 +83,7 @@ impl Cell {
             Cell::F(x) => *x,
             Cell::I(i) => *i as f64,
             Cell::T(_, x) => *x,
+            Cell::OrderF(x, _, _) => *x,
             _ => f64::NAN,
         }
     }
@@ -385,6 +388,8 @@ pub fn table(t: &Tbl, tid: &str, pnl_cols: &[&str]) -> String {
                     Cell::T(s, _) => s.clone(),
                     Cell::Tip(s, _) => s.clone(),
                     Cell::Order(s, _, _) => s.clone(),
+                    Cell::OrderF(x, _, _) if x.is_nan() => "–".into(),
+                    Cell::OrderF(x, _, _) => py_float(*x),
                 },
             };
             let (txt, sign) = unsign(&txt);
@@ -392,6 +397,7 @@ pub fn table(t: &Tbl, tid: &str, pnl_cols: &[&str]) -> String {
                 Cell::F(x) if !x.is_nan() => py_float(*x),
                 Cell::I(i) => i.to_string(),
                 Cell::T(_, x) if !x.is_nan() => py_float(*x),
+                Cell::OrderF(x, _, _) if !x.is_nan() => py_float(*x),
                 _ => txt.clone(),
             };
             let mut cls = "";
@@ -420,7 +426,7 @@ pub fn table(t: &Tbl, tid: &str, pnl_cols: &[&str]) -> String {
             };
             let html = match v {
                 Cell::Tip(_, note) => format!("<span data-tip=\"{}\" tabindex=\"0\">{}</span>", esc(note), html),
-                Cell::Order(_, id, refs) if !id.is_empty() => format!(
+                Cell::Order(_, id, refs) | Cell::OrderF(_, id, refs) if !id.is_empty() => format!(
                     "<button type=\"button\" class=\"ord-edit\" data-oid=\"{}\" data-ref=\"{}\" title=\"Change this order's limit price\">{}</button>",
                     esc(id), esc(refs), html),
                 _ => html,

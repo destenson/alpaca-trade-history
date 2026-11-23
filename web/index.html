@@ -120,11 +120,17 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
     <label>New limit (per spread)<input id="ordPx" type="number" step="0.01" min="0" inputmode="decimal" autocomplete="off"></label>
     <label id="ordSideL">&nbsp;<select id="ordSide"><option value="debit">debit</option><option value="credit">credit</option></select></label>
   </div>
+  <div class="ordrow" id="ordProfitRow" hidden>
+    <label>Profit if filled ($, vs. cost basis)<input id="ordProfit" type="number" step="1" inputmode="decimal" autocomplete="off"></label>
+    <span id="ordProfitNote" class="muted"></span>
+  </div>
   <p id="ordMode" class="muted" hidden>This order is "accepted" (held by Alpaca until the market opens), so it can't be changed in place: it will be cancelled and placed again at the new price.</p>
   <p id="ordConfirm" class="ordconfirm" hidden></p>
   <p id="ordErr" class="err" hidden></p>
   <div class="ordbtns">
-    <button type="button" id="ordCancel" class="ghost">Cancel</button>
+    <button type="button" id="ordKill" class="ghost danger">Cancel order…</button>
+    <span class="grow"></span>
+    <button type="button" id="ordCancel" class="ghost">Close</button>
     <button type="button" id="ordGo" class="primary">Review change</button>
   </div>
 </dialog>

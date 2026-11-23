@@ -1027,6 +1027,7 @@ function openOrderDialog(d, place = false) {
   if (!o || o.type !== 'limit' || o.limit_price == null) {
     $('ordWhat').textContent = 'This order is no longer open or has no limit price to change. Refresh to update the report.';
     $('ordRefs').textContent = ''; $('ordPx').closest('.ordrow').hidden = true; $('ordGo').disabled = true;
+    $('ordProfitRow').hidden = true; $('ordKill').hidden = true;
     ordCur = null; dlg.showModal(); return;
   }
   $('ordPx').closest('.ordrow').hidden = false;
@@ -1059,10 +1060,20 @@ function openOrderDialog(d, place = false) {
     $('ordErr').hidden = false;
   }
   dlg.showModal();
-  $('ordPx').focus(); $('ordPx').select();
+  // closing orders: work from a target profit too (cash at the limit − cost basis of what it closes)
+  const basis = num(ref.basis), scale = num(ref.scale);
+  ordCur.basis = basis !== null && scale > 0 && !place ? basis : null;
+  ordCur.scale = scale;
+  $('ordProfitRow').hidden = ordCur.basis === null;
+  $('ordKill').hidden = place;
+  if (ordCur.basis !== null) syncProfit();
+  const focus = ordCur.basis !== null && ref.profit ? $('ordProfit') : $('ordPx');
+  focus.focus(); focus.select();
 }
 function setOrdMode() {
   $('ordConfirm').hidden = true;
+  if (ordCur) ordCur.killing = false;
+  $('ordKill').textContent = 'Cancel order…'; $('ordKill').disabled = false;
   $('ordGo').disabled = false;
   $('ordGo').textContent = ordCur?.place ? 'Review new order' : ordCur?.recreate ? 'Review cancel & re-place' : 'Review change';
   $('ordMode').hidden = !ordCur?.recreate;
@@ -1094,7 +1105,62 @@ function newLimit() {
   const r = Math.round(v * 100) / 100;
   return ordCur.mleg && $('ordSide').value === 'credit' ? -r : r;
 }
-for (const id of ['ordPx', 'ordSide']) $(id).addEventListener('input', () => { setOrdMode(); $('ordErr').hidden = true; });
+for (const id of ['ordPx', 'ordSide']) $(id).addEventListener('input', () => { setOrdMode(); $('ordErr').hidden = true; syncProfit(); });
+// signed (debit positive) <-> what the inputs hold
+const signedOf = (c, nl) => (c.mleg ? nl : (c.order.side === 'sell' ? -nl : nl));
+function syncProfit() {          // price typed: show the profit it gives
+  const c = ordCur;
+  if (!c || c.basis === null) return;
+  const nl = newLimit();
+  $('ordProfit').value = nl === null ? '' : (-signedOf(c, nl) * c.scale - c.basis).toFixed(2);
+  $('ordProfitNote').textContent = '';
+}
+$('ordProfit').addEventListener('input', () => {      // profit typed: set the price that gives it
+  const c = ordCur;
+  if (!c || c.basis === null) return;
+  setOrdMode(); $('ordErr').hidden = true;
+  const want = Number($('ordProfit').value);
+  if ($('ordProfit').value === '' || !Number.isFinite(want)) { $('ordProfitNote').textContent = ''; return; }
+  const net = Math.round((-(want + c.basis) / c.scale) * 100) / 100;      // signed, debit positive
+  if (!c.mleg && (c.order.side === 'sell' ? net > 0 : net < 0)) {
+    $('ordProfitNote').textContent = `needs a ${c.order.side === 'sell' ? 'negative sale' : 'negative'} price: not possible`;
+    return;
+  }
+  $('ordPx').value = Math.abs(net).toFixed(2);
+  $('ordSide').value = net < 0 ? 'credit' : 'debit';
+  const got = -net * c.scale - c.basis;
+  $('ordProfitNote').textContent = `→ ${dc(net, c.mleg)}` + (Math.abs(got - want) >= 0.005 ? ` (profit ${got < 0 ? '−' : ''}${money2(got)} after rounding to the cent)` : '');
+});
+
+// Cancel the order outright (two clicks)
+$('ordKill').addEventListener('click', async () => {
+  const c = ordCur;
+  if (!c || c.place || !lastCreds) return;
+  if (!c.killing) {
+    c.killing = true;
+    $('ordConfirm').textContent = `Cancel this order at Alpaca (limit ${dc(c.lim, c.mleg)}, quantity ${c.qty}, ${(c.order.time_in_force || '').toUpperCase()})? ` +
+      'It will be listed under "Cancelled in the last day", where you can place it again.';
+    $('ordConfirm').hidden = false; $('ordErr').hidden = true;
+    $('ordKill').textContent = 'Confirm: cancel order';
+    return;
+  }
+  $('ordKill').disabled = true; $('ordGo').disabled = true; $('ordKill').textContent = 'Cancelling…';
+  const api = new Alpaca(lastCreds);
+  try {
+    await api.cancelOrder(c.id);
+  } catch (e) {
+    showOrdErr(`Alpaca refused to cancel the order (${e.message}).`);
+    $('ordKill').disabled = false; $('ordGo').disabled = false; $('ordKill').textContent = 'Confirm: cancel order';
+    return;
+  }
+  let st = '';
+  for (let i = 0; i < 10; i++) {
+    try { st = (await api.getOrder(c.id))?.status || ''; } catch (_) { st = ''; }
+    if (['canceled', 'filled', 'expired'].includes(st)) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  await afterOrderChange(st === 'canceled' ? `· ${c.und} order cancelled` : `· ${c.und} cancel requested (status ${st || 'unknown'})`, st !== 'canceled');
+});
 $('ordCancel').addEventListener('click', () => $('ordDlg').close());
 async function afterOrderChange(msg, err) {
   $('ordDlg').close();
@@ -1113,6 +1179,7 @@ $('ordGo').addEventListener('click', async () => {
   const nl = newLimit();
   if (nl === null) { showOrdErr('Enter a price, e.g. 2.45.'); return; }
   const c = ordCur;
+  if (c.killing) setOrdMode();             // the cancel confirmation was showing: start this review afresh
   if ($('ordConfirm').hidden) {           // first click: show exactly what will be sent
     if (nl === c.lim && !c.place) { showOrdErr('That is the current limit.'); return; }
     // buying power: the old order's share is released when it is replaced or cancelled

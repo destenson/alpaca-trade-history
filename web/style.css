@@ -106,3 +106,7 @@ main:has(#result:not([hidden])) { max-width: 1440px; }
 #ordDlg .ordbtns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .cancelled { margin-top: 4px; }
 .cancelled .cxl { white-space: nowrap; }
+#ordDlg .ordbtns .grow { flex: 1; }
+#ordDlg button.danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 50%, transparent); }
+#ordDlg #ordProfitRow { margin-top: 10px; }
+#ordDlg #ordProfitNote { padding-bottom: 9px; }
