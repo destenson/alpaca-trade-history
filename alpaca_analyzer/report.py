@@ -808,8 +808,8 @@ class Report:
         show = pd.DataFrame({
             "Underlying": df["underlying"],
             "Closed (W/L)": [f"{w} / {l}" for w, l in zip(df["wins"], df["losses"])],
-            "Profits from wins": df["profits"], "Shares": df["shares"], "Avg cost": df["avg_cost"],
-            "Cash left": df["cash"], "Shares (L)": df["net_shares"], "Cash left (L)": df["net_cash"],
+            "Profits from wins": df["profits"], "Shares": df["shares"], "Shares (L)": df["net_shares"],
+            "Avg cost": df["avg_cost"], "Cash left": df["cash"], "Cash left (L)": df["net_cash"],
             "Price now": df["price_now"], "Value now": df["value"].where(df["shares"] > 0),
             "Gain on shares": df["gain"], "You hold": df["held"], "Vs. plan": df["short_by"],
         })
