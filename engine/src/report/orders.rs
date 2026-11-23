@@ -32,6 +32,15 @@ fn rr(o: &PendingOrder) -> f64 {
     o.max_gain / -o.max_loss
 }
 
+/// Strategy, tagged when the contracts have no quotes yet.
+fn strat(o: &PendingOrder) -> String {
+    if o.no_market {
+        format!("{} (no quotes yet)", o.strategy)
+    } else {
+        o.strategy.clone()
+    }
+}
+
 fn name(o: &PendingOrder) -> String {
     match o.expiry {
         Some(e) => format!("{} {} {}", o.underlying, o.strategy, e.format("%m/%d")),
@@ -111,7 +120,8 @@ impl<'a> Report<'a> {
 
         // ---- tiles
         let net: f64 = opening.iter().filter_map(|o| o.net.map(|n| n * o.units * o.mult())).sum();
-        let fin_loss: Vec<f64> = priced.iter().map(|&i| opening[i].max_loss).filter(|v| !v.is_infinite()).collect();
+        // a worst case that is still a gain (e.g. an inverted strangle bought at $0) counts as no loss
+        let fin_loss: Vec<f64> = priced.iter().map(|&i| opening[i].max_loss.min(0.0)).filter(|v| !v.is_infinite()).collect();
         let fin_gain: Vec<f64> = priced.iter().map(|&i| opening[i].max_gain).filter(|v| !v.is_infinite()).collect();
         let n_unl = priced.iter().filter(|&&i| opening[i].max_loss.is_infinite()).count();
         let pops: Vec<f64> = priced.iter().filter_map(|&i| opening[i].pop).collect();
@@ -130,7 +140,11 @@ impl<'a> Report<'a> {
         let any_fill = opening.iter().any(|o| o.fill.is_some());
         let mut tiles: Vec<(String, String, String)> = vec![
             ("Open strategy orders".into(), opening.len().to_string(),
-                format!("{} underlyings{}", und_set.len(), nearest.map(|n| format!(" · first expiry {} ({} d)", n.format("%b %d"), (n - today).num_days())).unwrap_or_default())),
+                format!("{} underlyings{}{}", und_set.len(), nearest.map(|n| format!(" · first expiry {} ({} d)", n.format("%b %d"), (n - today).num_days())).unwrap_or_default(),
+                    match opening.iter().filter(|o| o.no_market).count() {
+                        0 => String::new(),
+                        n => format!(" · {} on contracts with no quotes yet", n),
+                    })),
             ("If all fill".into(), px(Some(pyround(net)), false).replace(".00", ""), "net premium at your limit prices, before fees".into()),
             ("Combined max loss".into(), if fin_loss.is_empty() { "–".into() } else { money(sfl, false, 0) },
                 format!("{} · each order's own worst case", if n_unl > 0 { format!("+ {} undefined-risk", n_unl) } else { "every order is defined-risk".into() })),
@@ -161,12 +175,12 @@ impl<'a> Report<'a> {
         if !priced.is_empty() {
             let ys: Vec<String> = priced.iter().enumerate().map(|(k, &i)| format!("{} · #{}", name(&opening[i]), k + 1)).collect();
             let gain: Vec<Value> = priced.iter().map(|&i| if opening[i].max_gain.is_infinite() { Value::Null } else { jr(opening[i].max_gain, 2) }).collect();
-            let loss: Vec<Value> = priced.iter().map(|&i| if opening[i].max_loss.is_infinite() { Value::Null } else { jr(opening[i].max_loss, 2) }).collect();
+            let loss: Vec<Value> = priced.iter().map(|&i| if opening[i].max_loss.is_infinite() { Value::Null } else { jr(opening[i].max_loss.min(0.0), 2) }).collect();
             let cd: Vec<Value> = priced
                 .iter()
                 .map(|&i| {
                     let o = &opening[i];
-                    json!([o.legs_label(), px(o.net, o.net_is_estimate), o.pop.map(|p| pyfmt_pct(p, 0, false)).unwrap_or_else(|| "–".into()), lim(o.max_gain), lim(o.max_loss)])
+                    json!([o.legs_label(), px(o.net, o.net_is_estimate), o.pop.map(|p| pyfmt_pct(p, 0, false)).unwrap_or_else(|| "–".into()), lim(o.max_gain), super::lim_loss(o.max_loss)])
                 })
                 .collect();
             let ht = "<b>%{y}</b><br>%{customdata[0]}<br>limit %{customdata[1]}<br>max profit %{customdata[3]} · max loss %{customdata[4]}<br>prob. of profit %{customdata[2]}<extra></extra>";
@@ -202,7 +216,7 @@ impl<'a> Report<'a> {
             .f("Edge vs est.", super::fm(true, 2));
         let mut payoff = Tbl::new(&["#", "Underlying", "Strategy", "Legs", "Expires", "Limit", "Max profit", "Max loss", "Reward/risk", "Breakevens", "Prob. profit"])
             .f("Max profit", super::flim())
-            .f("Max loss", super::flim())
+            .f("Max loss", super::flim_loss())
             .f("Reward/risk", super::fnum(2))
             .f("Prob. profit", super::fp(false, 0));
         for (k, o) in opening.iter().enumerate() {
@@ -210,7 +224,7 @@ impl<'a> Report<'a> {
                 (Some(m), Some(n)) if !o.net_is_estimate => (m - n) * o.units * o.mult(),
                 _ => f64::NAN,
             };
-            let head = |exp: Cell| vec![Cell::I(k as i64 + 1), Cell::s(&o.underlying), Cell::s(&o.strategy), Cell::s(o.legs_label()), exp, Cell::s(px(o.net, o.net_is_estimate))];
+            let head = |exp: Cell| vec![Cell::I(k as i64 + 1), Cell::s(&o.underlying), Cell::s(strat(o)), Cell::s(o.legs_label()), exp, Cell::s(px(o.net, o.net_is_estimate))];
             let dte = match o.expiry {
                 Some(e) => {
                     let d = (e - today).num_days();
@@ -251,17 +265,27 @@ impl<'a> Report<'a> {
             table(&entry, "t_orders", &["Edge vs mid", "Edge vs est."])
         ));
         parts.push(format!(
-            "<figure class=\"card wide\"><h3>If filled: payoff and odds</h3><p class=\"sub\">Each order held to expiration after filling at your limit, fees excluded. <b>Prob. profit</b> is the market-implied chance the underlying finishes past breakeven at the first expiry (lognormal at the legs' IV, no drift). {}</p>{}</figure>",
+            "<figure class=\"card wide\"><h3>If filled: payoff and odds</h3><p class=\"sub\">Each order held to expiration after filling at your limit, fees excluded. <b>Prob. profit</b> is the market-implied chance the underlying finishes past breakeven at the first expiry (lognormal at the legs' IV, no drift); it needs quotes, so orders on contracts that haven't traded yet show –. {}</p>{}</figure>",
             legs_note,
             table(&payoff, "t_payoff", &[])
         ));
 
         // ---- chance of filling
         let hz = ["<1d", "<2d", "<3d", "<5d", "<8d"];
-        let mut cols: Vec<&str> = vec!["#", "Underlying", "Strategy", "Legs", "TIF", "Limit", est_col];
+        let mut cols: Vec<&str> = vec!["#", "Underlying", "Strategy", "Legs", "DTE", "TIF", "Limit", est_col];
+        let dte_cell = |o: &PendingOrder| match o.expiry {
+            Some(e) => {
+                let d = (e - today).num_days();
+                Cell::T(format!("{}d", d), d as f64)
+            }
+            None => Cell::s("–"),
+        };
         cols.extend(hz.iter());
         cols.extend(["Before expiry", "Good until"]);
         let pf = |c: &Cell| {
+            if let Cell::S(t) = c {
+                return t.clone();
+            }
             let v = c.f();
             if v.is_nan() {
                 "–".to_string()
@@ -278,12 +302,32 @@ impl<'a> Report<'a> {
             ft = ft.f(h, pf);
         }
         for (k, o) in opening.iter().enumerate() {
+            if o.no_market {
+                let mut row = vec![Cell::I(k as i64 + 1), Cell::s(&o.underlying), Cell::s(strat(o)), Cell::s(o.legs_label()), dte_cell(o), Cell::s(o.tif.to_uppercase()),
+                                   Cell::s(px(o.net, o.net_is_estimate)), Cell::s("–")];
+                row.push(Cell::s("no quotes yet"));
+                row.extend((0..5).map(|_| Cell::N));
+                let good_until = if o.tif.eq_ignore_ascii_case("gtc") {
+                    let cap = o.submitted.map(|s| util::ny_date(&(s + chrono::Duration::days(crate::fillodds::GTC_DAYS))));
+                    match (o.expiry, cap) {
+                        (Some(e), Some(c)) => super::isod(e.min(c)),
+                        (Some(e), None) => super::isod(e),
+                        _ => "GTC".into(),
+                    }
+                } else {
+                    "end of session".into()
+                };
+                row.push(Cell::s(good_until));
+                ft.push(row);
+                continue;
+            }
             let Some(f) = &o.fill else { continue };
             let mut row = vec![
                 Cell::I(k as i64 + 1),
                 Cell::s(&o.underlying),
                 Cell::s(&o.strategy),
                 Cell::s(o.legs_label()),
+                dte_cell(o),
                 Cell::s(o.tif.to_uppercase()),
                 Cell::s(px(o.net, o.net_is_estimate)),
                 Cell::s(px(o.est_open, false)),
@@ -328,11 +372,12 @@ impl<'a> Report<'a> {
         for (j, (all, und, os)) in items.iter().enumerate() {
             let vid = format!("ov_{}", j);
             let (label, cur, mut stats, comb_ml, comb_mg, comb_be, sp, exp_lbl, model, net_total, um, rows_k, est_total);
+            let no_market = os.iter().all(|&i| opening[i].no_market);
             if *all {
                 let refs: Vec<&PendingOrder> = os.iter().map(|&i| &opening[i]).collect();
                 let Some(d) = O::combine(&refs, &a.open_positions, snaps, today, Some(&market)) else { continue };
                 label = format!("{}: all {} orders together", und, os.len());
-                stats = format!("{} orders · net {} · max profit {} · max loss {} · breakevens {}", os.len(), px(Some(d.net), false), lim(d.max_gain), lim(d.max_loss), bes(&d.breakevens));
+                stats = format!("{} orders · net {} · max profit {} · max loss {} · breakevens {}", os.len(), px(Some(d.net), false), lim(d.max_gain), super::lim_loss(d.max_loss), bes(&d.breakevens));
                 comb_ml = d.curves.comb_max_loss;
                 comb_mg = d.curves.comb_max_gain;
                 comb_be = d.curves.comb_breakevens.clone();
@@ -356,7 +401,7 @@ impl<'a> Report<'a> {
                     px(o.mid_now, false),
                     px(o.natural, false),
                     lim(o.max_gain),
-                    lim(o.max_loss),
+                    super::lim_loss(o.max_loss),
                     num(rr(o), 2),
                     bes(&o.breakevens),
                     o.pop.map(|p| format!(" · prob. of profit ~{}", pyfmt_pct(p, 0, false))).unwrap_or_default()
@@ -384,20 +429,23 @@ impl<'a> Report<'a> {
                 };
                 stats.push_str(&format!("<br><span class=\"rp-est\" id=\"est_{}\">{}</span>", vid, est_txt));
             }
+            if no_market {
+                stats.push_str("<br>No quotes yet on these contracts: the payoff at expiration is shown; the estimated value curve appears once they trade.");
+            }
             if cur.combined.is_some() {
                 stats.push_str(&format!(
                     "<br>With your current {} position: max loss after fill {} · max profit {} · breakevens {}",
                     esc(und),
-                    lim(comb_ml),
+                    super::lim_loss(comb_ml),
                     lim(comb_mg),
                     bes(&comb_be)
                 ));
             }
             let open_name = if model.is_some() { if market.is_open { "Order now (est.)" } else { "Order at next open (est.)" } } else { "Order today (at IV)" };
-            let mut data = vec![
-                json!({"type": "scatter", "mode": "lines", "name": "Order at expiration", "x": super::jraw(&cur.x), "y": super::jraw(&cur.expiry), "line": {"color": S[0], "width": 2.5}}),
-                json!({"type": "scatter", "mode": "lines", "name": open_name, "x": super::jraw(&cur.x), "y": super::jraw(&cur.today), "line": {"color": S[0], "width": 1.5, "dash": "dot"}}),
-            ];
+            let mut data = vec![json!({"type": "scatter", "mode": "lines", "name": "Order at expiration", "x": super::jraw(&cur.x), "y": super::jraw(&cur.expiry), "line": {"color": S[0], "width": 2.5}})];
+            if !no_market {      // with no quotes, a value before expiration would rest on a guessed volatility
+                data.push(json!({"type": "scatter", "mode": "lines", "name": open_name, "x": super::jraw(&cur.x), "y": super::jraw(&cur.today), "line": {"color": S[0], "width": 1.5, "dash": "dot"}}));
+            }
             let mut t_mark = Value::Null;
             let mut t_comb = Value::Null;
             if model.is_some() {

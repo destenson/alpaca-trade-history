@@ -106,6 +106,9 @@ pub struct PendingOrder {
     pub est_open: Option<f64>,
     pub model: Option<OrderModel>,
     pub fill: Option<crate::fillodds::FillOdds>,
+    /// none of the option legs has a quote, a trade or an implied volatility yet (e.g. newly listed
+    /// contracts before their first session): nothing to estimate prices from
+    pub no_market: bool,
 }
 
 impl PendingOrder {
@@ -186,6 +189,7 @@ pub fn parse_orders(raw: &[Value]) -> Vec<PendingOrder> {
             est_open: None,
             model: None,
             fill: None,
+            no_market: false,
         };
         let leg = |sym: String, ratio: f64, it: String| OrderLeg { symbol: sym, ratio, intent: it, bid: None, ask: None, iv: None, greeks: Greeks::default(), model: None };
         if jv::s(o, "order_class") == "mleg" {
@@ -396,6 +400,7 @@ pub fn evaluate(
                 None => Greeks::default(),
             };
         }
+        po.no_market = po.is_option && po.legs.iter().filter(|l| l.is_option()).all(|l| l.bid.is_none() && l.ask.is_none() && l.iv.is_none());
         let mu = market.and_then(|m| m.underlyings.get(&po.underlying));
         po.spot = mu.and_then(|u| u.spot).filter(|v| *v != 0.0).or_else(|| spot_of(&po.underlying));
         let mids: Vec<Option<f64>> = po.legs.iter().map(|l| l.mid()).collect();
@@ -466,7 +471,7 @@ pub fn evaluate(
         po.pop = pop(&legs_in(&ur), spot, today, po.expiry, iv);
         let mut curves = OrderCurves { x: g.curve_x.clone(), expiry: g.curve_expiry.clone(), today: g.curve_today.clone(), ..Default::default() };
         let mut models = HashMap::new();
-        if let Some(m) = market.filter(|m| m.underlyings.contains_key(&po.underlying)) {
+        if let Some(m) = market.filter(|m| m.underlyings.contains_key(&po.underlying) && !po.no_market) {
             models = models_for(&allu, snapshots, Some(m), &po.underlying, &und_ivs);
             for l in po.legs.iter_mut() {
                 l.model = models.get(&l.symbol).cloned();
@@ -533,7 +538,7 @@ pub fn combine(orders: &[&PendingOrder], open_positions: &[OpenPos], snapshots: 
         model: None,
     };
     let mut models = HashMap::new();
-    if let Some(m) = market.filter(|m| m.underlyings.contains_key(&os[0].underlying)) {
+    if let Some(m) = market.filter(|m| m.underlyings.contains_key(&os[0].underlying) && !os.iter().any(|o| o.no_market)) {
         models = models_for(&allu, snapshots, Some(m), &os[0].underlying, &rp::underlying_ivs(snapshots));
         d.curves.today = curve_open(&ur, &models, &g.curve_x, 0.0);
         d.est_open = Some(os.iter().filter_map(|o| o.est_open.map(|e| e * o.units * o.mult())).sum());

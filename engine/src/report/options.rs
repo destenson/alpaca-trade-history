@@ -444,7 +444,7 @@ impl<'a> Report<'a> {
         let mut head = format!(
             "Whole position: max gain {} · max loss {} · breakevens {} · unrealized {}{}",
             lim(whole.max_gain),
-            lim(whole.max_loss),
+            super::lim_loss(whole.max_loss),
             if whole.breakevens.is_empty() { "none".to_string() } else { dollars_list(&whole.breakevens) },
             money(whole.unrealized, true, 2),
             match whole.greeks.theta.filter(|t| *t != 0.0) {
@@ -503,7 +503,7 @@ impl<'a> Report<'a> {
                 .f("Value", super::fm(true, 2))
                 .f("Unrealized", super::fm(true, 2))
                 .f("Max gain", super::flim())
-                .f("Max loss", super::flim())
+                .f("Max loss", super::flim_loss())
                 .f("Δ sh", super::fnum(1))
                 .f("Θ $/day", super::fm(true, 2));
             for grp in &r.groups {

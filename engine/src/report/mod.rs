@@ -431,6 +431,19 @@ pub fn lim(v: f64) -> String {
     }
 }
 
+/// A max loss that is actually a gain (the worst outcome still makes money): 'none (worst +$X)'.
+pub fn lim_loss(v: f64) -> String {
+    if v.is_finite() && v > 0.0 {
+        format!("none (worst {})", money(v, true, 2))
+    } else {
+        lim(v)
+    }
+}
+
+pub fn flim_loss() -> impl Fn(&Cell) -> String {
+    |c: &Cell| lim_loss(c.f())
+}
+
 pub fn iso(t: &Ts) -> String {
     util::iso_ts(t)
 }

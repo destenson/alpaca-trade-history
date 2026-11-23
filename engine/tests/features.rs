@@ -112,6 +112,24 @@ fn single_leg_option_and_partial_fill() {
 }
 
 #[test]
+fn orders_on_contracts_with_no_quotes_yet() {
+    // a $0 inverted strangle on contracts that haven't traded: payoff kept, estimates and fill odds not guessed
+    let (mut b, _) = fixture("08_order_estimate_and_report_inputs");
+    b["orders"] = json!([{"id": "ant", "order_class": "mleg", "type": "limit", "qty": "10", "filled_qty": "0", "limit_price": "0",
+        "status": "accepted", "time_in_force": "gtc", "submitted_at": "2026-11-22T03:26:01Z",
+        "legs": [{"symbol": "ZS261218C00200000", "side": "buy", "position_intent": "buy_to_open", "ratio_qty": "1"},
+                 {"symbol": "ZS261218P00230000", "side": "buy", "position_intent": "buy_to_open", "ratio_qty": "1"}]}]);
+    let (o, _) = zs_order(&b);
+    assert!(o.no_market && o.est_open.is_none() && o.model.is_none() && o.pop.is_none());
+    assert!(approx(o.max_loss, 30.0 * 100.0 * 10.0));          // worst case at expiration is still a $30/share gain
+    let r = reports(&b, &json!({}));
+    let full = r["full"].as_str().unwrap();
+    for s in ["Long strangle (no quotes yet)", "no quotes yet</td>", "none (worst +", "1 on contracts with no quotes yet"] {
+        assert!(full.contains(s), "{s}");
+    }
+}
+
+#[test]
 fn orders_tab_and_shared_view() {
     let (b, o) = fixture("07_order_symbols_and_report_tab");
     let r = reports(&b, &o);
