@@ -687,6 +687,13 @@ setInterval(() => { if (!$('result').hidden) checkForUpdate(); }, 5 * 60e3);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && !$('result').hidden) checkForUpdate();
 });
+// switching back from another window (not another tab) only fires focus
+let lastFocusCheck = 0;
+window.addEventListener('focus', () => {
+  if ($('result').hidden || Date.now() - lastFocusCheck < 30e3) return;
+  lastFocusCheck = Date.now();
+  checkForUpdate();
+});
 let refreshing = false;
 
 let lastMeta = null;
