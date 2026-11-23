@@ -605,7 +605,7 @@ impl<'a> Report<'a> {
             let early: Vec<f64> = a.ledger.closed_df().iter().filter(|t| util::ny_date(&t.close_time) < start).map(|t| t.pnl).collect();
             if !early.is_empty() {
                 items.push(format!(
-                    "<li><b>Window:</b> analysis starts {}. {} earlier closed lots ({}) are excluded; pass <code>--start</code> to change the window.</li>",
+                    "<li><b>Window:</b> analysis starts {}. {} earlier closed lots ({}) are excluded; set an earlier start date to include them.</li>",
                     start.format("%b %d, %Y"),
                     early.len(),
                     money(early.iter().sum(), true, 2)

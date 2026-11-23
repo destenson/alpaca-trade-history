@@ -17,7 +17,7 @@ use crate::util::{self, esc, money, py_float, Ts};
 
 pub const PLOTLY_CDN: &str = "https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js";
 pub const PLOTLY_SRI: &str = "sha384-cCVCZkAjYNxaYKbM8lsArLznDF/SvMFr1jcZrvOpSTCa0W40ZAdLzHCEulnUa5i7";
-const TEMPLATE: &str = include_str!("../../../alpaca_analyzer/templates/report.html");
+const TEMPLATE: &str = include_str!("../../templates/report.html");
 
 pub const S: [&str; 8] = ["var:series-1", "var:series-2", "var:series-3", "var:series-4", "var:series-5", "var:series-6", "var:series-7", "var:series-8"];
 pub const GAIN: &str = "var:gain";

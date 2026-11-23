@@ -527,7 +527,7 @@ fn coverage_alerts(eq: &EqFrame, ledger: &Ledger) -> Vec<String> {
     if let Some(mx) = trades.iter().max() {
         if (*mx - last_ph).num_days() > 7 {
             alerts.push(format!(
-                "Portfolio history ends {}, but trades continue to {}. Account-level charts (equity, returns, drawdown, benchmarks) only cover the history that was fetched. Re-run <code>alpaca-analyzer fetch</code> with the latest version.",
+                "Portfolio history ends {}, but trades continue to {}. Account-level charts (equity, returns, drawdown, benchmarks) only cover the history that was fetched. Use <b>Re-download everything</b> to fetch it again.",
                 last_ph.format("%Y-%m-%d"),
                 mx.format("%Y-%m-%d")
             ));
