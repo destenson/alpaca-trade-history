@@ -808,10 +808,9 @@ class Report:
             "Underlying": df["underlying"],
             "Closed (W/L)": [f"{w} / {l}" for w, l in zip(df["wins"], df["losses"])],
             "Profits from wins": df["profits"], "Shares": df["shares"], "Avg cost": df["avg_cost"],
-            "Cash left": df["cash"], "Price now": df["price_now"],
-            "Value now": df["value"].where(df["shares"] > 0),
+            "Cash left": df["cash"], "Shares (L)": df["net_shares"], "Cash left (L)": df["net_cash"],
+            "Price now": df["price_now"], "Value now": df["value"].where(df["shares"] > 0),
             "Gain on shares": df["gain"], "You hold": df["held"], "Vs. plan": df["short_by"],
-            "With losses: shares": df["net_shares"], "With losses: cash": df["net_cash"],
         })
         to_buy = df[df["short_by"] > 0]
         buy_cost = float((to_buy["short_by"] * to_buy["price_now"]).sum(skipna=True))
@@ -824,9 +823,9 @@ class Report:
                f"{money(buy_cost, dp=0)} at current prices.")
         note = ("How it's counted: each closed winning option position adds its profit to a pot for that underlying on "
                 "the day it closed; whenever the pot covers a share, whole shares are bought at that day's close and "
-                "the rest stays in the pot (<b>Cash left</b>). Losing positions are ignored. <b>With losses</b> shows "
-                "the stricter version: losses come out of the same pot, so they have to be earned back before more "
-                "shares are bought (shares already bought are kept; negative cash = losses still to recover). "
+                "the rest stays in the pot (<b>Cash left</b>). Losing positions are ignored. <b>(L)</b> columns count "
+                "losses too: they come out of the same pot, so they have to be earned back before more shares are "
+                "bought (shares already bought are kept; negative cash = losses still to recover). "
                 "<b>Vs. plan</b> compares with all the shares you hold now, however you bought them.")
         if unpriced:
             note += f" {unpriced} closing day(s) had no price history, so no shares were bought then."
@@ -836,9 +835,9 @@ class Report:
                                     "Avg cost": lambda v: money(v), "Cash left": lambda v: money(v),
                                     "Price now": lambda v: money(v), "Value now": lambda v: money(v),
                                     "Gain on shares": lambda v: money(v, True), "You hold": lambda v: f"{v:g}",
-                                    "Vs. plan": diff, "With losses: shares": lambda v: f"{v:g}",
-                                    "With losses: cash": lambda v: money(v, True)},
-                             tid="t_reinvest", pnl_cols=("Gain on shares", "With losses: cash"))
+                                    "Vs. plan": diff, "Shares (L)": lambda v: f"{v:g}",
+                                    "Cash left (L)": lambda v: money(v, True)},
+                             tid="t_reinvest", pnl_cols=("Gain on shares", "Cash left (L)"))
                 + f'<p class="note">{note}</p></figure>')
 
 
