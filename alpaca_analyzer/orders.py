@@ -129,10 +129,7 @@ def parse_orders(raw: list[dict]) -> list[PendingOrder]:
         typ = o.get("type") or o.get("order_type") or ""
         lim, stop = _f(o.get("limit_price")), _f(o.get("stop_price"))
         sub = o.get("submitted_at") or o.get("created_at")
-        try:
-            sub_t = datetime.fromisoformat(sub.replace("Z", "+00:00")[:26] + "+00:00") if sub else None
-        except ValueError:
-            sub_t = None
+        sub_t = RP._t(sub)
         common = dict(id=o.get("id", ""), submitted=sub_t, status=o.get("status", ""), order_type=typ,
                       tif=o.get("time_in_force", ""), units=units, stop=stop)
         if (o.get("order_class") or "") == "mleg":

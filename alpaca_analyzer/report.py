@@ -22,6 +22,7 @@ from .interpret import build_units, readings
 from . import orders as O
 from . import reprice as RP
 from .reinvest import reinvest_table
+from .fillodds import fill_odds
 from .glossary import tip as _tip
 from .optionsmath import payoff_curves
 
@@ -939,6 +940,7 @@ class Report:
         opts, views = [], []
         for j, r in enumerate(rs):
             vid = f"iv_{i}_{j}"
+            fid = "f_read_" + _slug(und, r.label, *sorted(g.legs_label for g in r.groups))
             tag = "As opened: " if r.as_opened else ""
             warn = f" ({r.undefined} undefined-risk)" if r.undefined else ""
             opts.append(f'<option value="{vid}">{html.escape(tag + r.label + warn)}</option>')
@@ -958,14 +960,14 @@ class Report:
                              "x": [spot], "y": [round(est_unreal, 2)],
                              "marker": {"color": "var:ink", "size": 9, "symbol": "circle-open", "line": {"width": 2}},
                              "hovertemplate": "est. P&L %{y:$,.2f}<extra></extra>"})
-                self.rp_views.append({"kind": "pos", "fid": f"f_read_{i}_{j}", "und": und, "x": whole["x"],
+                self.rp_views.append({"kind": "pos", "fid": fid, "und": und, "x": whole["x"],
                                       "order": model, "pos": None, "net": 0.0, "um": None, "t_open": len(data) - 2,
                                       "t_mark": len(data) - 1, "t_comb": None, "est": f"est_rd_{i}", "rows": []})
             shapes = [{"type": "line", "x0": spot, "x1": spot, "yref": "paper", "y0": 0, "y1": 1,
                        "line": {"color": "var:muted", "width": 1, "dash": "dot"}},
                       {"type": "line", "xref": "paper", "x0": 0, "x1": 1, "y0": 0, "y1": 0,
                        "line": {"color": "var:axis", "width": 1}}]
-            fig = self.fig(f"f_read_{i}_{j}", data, {
+            fig = self.fig(fid, data, {
                 "shapes": shapes, "hovermode": "x unified", "showlegend": True,
                 "legend": {"orientation": "h", "y": -0.22, "yanchor": "top"},
                 "xaxis": {"tickprefix": "$", "title": {"text": f"{und} price at expiration"}},
@@ -1028,6 +1030,8 @@ class Report:
             self.section("orders", "Orders", '<p class="empty">No open option strategy orders.</p>' + skip_note)
             return
         opening.sort(key=lambda o: (o.expiry or date.max, o.underlying, (o.submitted.timestamp() if o.submitted else 0)))
+        for o in opening:
+            o.fill = fill_odds(o, market) if market is not None and o.model else None
         priced = [o for o in opening if o.curves]
         when = _when(market)
 
@@ -1080,8 +1084,9 @@ class Report:
              "at first expiry, from implied vol"),
             ("Limits vs mid", f"{sum(e >= -0.005 for e in edge)}/{len(edge)}" if edge else "–",
              "priced at or better than the quoted mid (less likely to fill)"),
-            ("Likely to fill", f"{sum(e <= 0.5 for e in ests)}/{len(ests)}" if ests else "–",
-             f"limit at or through the estimated value at {'current prices' if market.is_open else 'the open'}"),
+            ("Likely to fill", (f"{sum((o.fill or {}).get('h1', 0) >= 0.5 for o in opening)}/"
+                                f"{sum(bool(o.fill) for o in opening)}") if any(o.fill for o in opening) else "–",
+             '<a href="#fillodds" class="tilelink">50%+ chance in the next session: see which</a>'),
         ]
         if stale:
             tiles.insert(1, ("Moved since quotes", str(len(stale)),
@@ -1150,6 +1155,35 @@ class Report:
                          "Max loss": _lim, "Reward/risk": lambda v: num(v, 2),
                          "Prob. profit": lambda v: pct(v, dp=0), "Spot": lambda v: money(v)},
                          tid="t_orders", pnl_cols=("Edge vs mid", "Edge vs est.")) + '</figure>')
+
+        # ---- chance of filling
+        frows = []
+        for k, o in enumerate(opening):
+            f = getattr(o, "fill", None)
+            if not f:
+                continue
+            row = {"#": k + 1, "Underlying": o.underlying, "Strategy": o.strategy, "Legs": o.legs_label,
+                   "TIF": o.tif.upper(), "Limit": px(o.net, o.net_is_estimate),
+                   ("Est. now" if market.is_open else "Est. at open"): px(o.est_open)}
+            for h in (1, 2, 3, 5, 8):
+                v = f.get(f"h{h}")
+                row[f"<{h}d"] = math.nan if v is None else v
+            row["Before expiry"] = math.nan if f.get("expiry") is None else f["expiry"]
+            row["Good until"] = f["last_day"].isoformat() if f.get("gtc") else "end of session"
+            frows.append(row)
+        if frows:
+            pf = lambda v: "–" if v is None or (isinstance(v, float) and math.isnan(v)) else (  # noqa: E731
+                "<1%" if 0 < v < 0.005 else ">99%" if 0.995 < v < 1 else f"{v:.0%}")
+            parts.append('<figure class="card wide" id="fillodds"><h3>Chance of filling</h3><p class="sub">Chance the '
+                         'estimated value of each order reaches your limit within the next 1, 2, 3, 5 and 8 trading '
+                         'sessions (DAY orders only have the session they live for). GTC orders also show the chance '
+                         'before they expire: the first option expiration, or Alpaca\'s 90-day GTC limit. Simulated '
+                         'from the re-pricing price at the legs\' implied volatility, re-pricing the spread every half '
+                         'hour of trading; it measures the fair value touching your limit, so treat it as a guide: '
+                         'actual fills also depend on the bid/ask and market makers.</p>'
+                         + self.table(pd.DataFrame(frows), {**{f"<{h}d": pf for h in (1, 2, 3, 5, 8)},
+                                                            "Before expiry": pf},
+                                      tid="t_fill") + '</figure>')
 
         # ---- payoff explorer
         opts, views = [], []
@@ -1236,7 +1270,8 @@ class Report:
                        "line": {"color": "var:axis", "width": 1}}]
             mu = market.underlyings.get(und)
             spot_lbl = ("latest" if mu and mu.stale else "spot")
-            fig = self.fig(f"f_ord_{j}", data, {
+            fid = "f_ord_" + (_slug(und, "all") if kind == "all" else _slug(und, os_[0].id or os_[0].legs_label))
+            fig = self.fig(fid, data, {
                 "shapes": shapes, "hovermode": "x unified", "showlegend": True,
                 "legend": {"orientation": "h", "y": -0.22, "yanchor": "top"},
                 "xaxis": {"tickprefix": "$", "title": {"text": f"{und} price at expiration"
@@ -1245,7 +1280,7 @@ class Report:
                 "annotations": [{"x": sp, "yref": "paper", "y": 1, "text": f"{spot_lbl} ${sp:,.2f}", "showarrow": False,
                                  "yanchor": "bottom", "font": {"size": 11}}]}, 380)
             if model:
-                rp_views.append({"kind": "order", "fid": f"f_ord_{j}", "und": und, "x": cur["x"], "order": model["order"],
+                rp_views.append({"kind": "order", "fid": fid, "und": und, "x": cur["x"], "order": model["order"],
                                  "pos": model.get("pos") if t_comb is not None else None, "net": net_total, "um": um,
                                  "t_open": 1, "t_mark": t_mark, "t_comb": t_comb, "est": f"est_{vid}", "rows": rows_k})
             if und != group_open:
@@ -1463,6 +1498,14 @@ def _unsign(txt):
     if not m:
         return txt, ""
     return m.group(2).replace("$ ", "$"), "−" if m.group(1) in "−-" else "+"
+
+
+def _slug(*parts) -> str:
+    """Stable, lowercase chart-id fragment (chart ids are used to remember per-chart settings)."""
+    import hashlib
+    raw = "|".join(str(p) for p in parts)
+    head = re.sub(r"[^a-z0-9]", "", str(parts[0]).lower())[:8] if parts else ""
+    return f"{head}_{hashlib.sha1(raw.encode()).hexdigest()[:8]}"
 
 
 def _tip_attr(label: str) -> str:

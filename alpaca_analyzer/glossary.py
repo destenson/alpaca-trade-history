@@ -89,7 +89,17 @@ TIPS: dict[str, str] = {
     "Combined max profit": "Sum of each order's best case at expiration.",
     "Median prob. of profit": "Typical order's market-implied chance of finishing past breakeven.",
     "Limits vs mid": "Orders priced at or better than the quoted mid.",
-    "Likely to fill": "Orders whose limit is at or through the estimated value at the open.",
+    "Likely to fill": "Orders with a 50%+ chance their estimated value reaches the limit in the next trading session "
+                      "(see the Chance of filling table).",
+    "<1d": "Chance the estimated value reaches your limit during the next trading session (the rest of today's if "
+           "the market is open).",
+    "<2d": "Chance within the next 2 trading sessions.",
+    "<3d": "Chance within the next 3 trading sessions.",
+    "<5d": "Chance within the next 5 trading sessions (about a week).",
+    "<8d": "Chance within the next 8 trading sessions.",
+    "Before expiry": "GTC only: chance before the order expires (first option expiration or the 90-day GTC limit).",
+    "Good until": "When the order stops working: DAY orders at the end of the session; GTC at the first option "
+                  "expiration or after 90 days.",
     "Moved since quotes": "Underlyings that moved 2%+ after the option quotes were last updated.",
     # ---- re-pricing inputs
     "Quotes reflect": "The underlying price the option quotes were set at: the session close when the market is closed.",

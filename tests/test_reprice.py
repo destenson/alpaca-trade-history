@@ -186,3 +186,27 @@ def test_buy_and_hold_for_options_only_name_uses_bars():
     s = analysis.run(b).symbols.loc["DDD"]
     assert s["realized"] == pytest.approx(50) and s["bhc_end"] == date(2026, 1, 9)
     assert s["bhc_capital"] == pytest.approx(200) and s["bhc_pnl"] == pytest.approx(200 * (55 / 50 - 1))
+
+
+def _evaluated(limit, tif="day"):
+    b = _bundle()
+    b.orders[0]["limit_price"] = str(limit)
+    b.orders[0]["time_in_force"] = tif
+    a = analysis.run(b)
+    m = RP.market_state(b.clock, b.stock_snapshots, ["ZS"], RP.quote_times(b.option_snapshots))
+    (o,) = O.evaluate(O.parse_orders(b.orders), a.ledger, a.open_positions, b.option_snapshots, lambda u: None,
+                      date(2026, 11, 22), market=m)
+    return o, m
+
+
+def test_fill_odds_bounds_and_monotonic():
+    from alpaca_analyzer.fillodds import fill_odds
+    o, m = _evaluated(4.9)                      # far above the estimated value: fills at the open
+    assert fill_odds(o, m)["h1"] == 1.0
+    o, m = _evaluated(0.01)                     # far below: practically never within a day
+    f = fill_odds(o, m)
+    assert f["h1"] < 0.02 and f["h2"] is None and f["expiry"] is None
+    o, m = _evaluated(round(o.est_open * 0.85, 2), "gtc")
+    f = fill_odds(o, m)
+    seq = [f["h1"], f["h2"], f["h3"], f["h5"], f["expiry"]]
+    assert all(x <= y + 1e-12 for x, y in zip(seq, seq[1:])) and 0 < f["expiry"] < 1
