@@ -66,6 +66,8 @@ pub enum Cell {
     S(String),
     F(f64),
     I(i64),
+    /// text shown, number sorted by
+    T(String, f64),
     N,
 }
 
@@ -74,6 +76,7 @@ impl Cell {
         match self {
             Cell::F(x) => *x,
             Cell::I(i) => *i as f64,
+            Cell::T(_, x) => *x,
             _ => f64::NAN,
         }
     }
@@ -243,6 +246,86 @@ pub fn ticker(text: &str) -> String {
     )
 }
 
+/// A legs label ('+1 11/27 340C, −1 11/27 342.5C', '+100 sh'; the shared view drops quantities) as compact
+/// HTML: each expiry written once, buys blue and sells red instead of +/−, a quantity only when it isn't 1:
+/// '11/27 340C 342.5C'. Text that doesn't parse is shown as is.
+pub fn legs_html(txt: &str) -> String {
+    struct Leg {
+        buy: bool,
+        qty: Option<String>,
+        date: Option<String>,
+        what: String,
+    }
+    let mut legs = Vec::new();
+    for part in txt.split(", ") {
+        let mut ch = part.chars();
+        let buy = match ch.next() {
+            Some('+') => true,
+            Some('−') | Some('-') => false,
+            _ => return esc(txt),
+        };
+        let rest: &str = ch.as_str();
+        let toks: Vec<&str> = rest.split(' ').filter(|t| !t.is_empty()).collect();
+        let num_ok = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit() || c == '.');
+        let (qty, toks) = match toks.first() {
+            Some(t) if num_ok(t) && !rest.starts_with(' ') => (Some(t.to_string()), &toks[1..]),
+            _ => (None, &toks[..]),
+        };
+        let leg = match toks {
+            [d, w] if d.len() == 5 && d.as_bytes()[2] == b'/' => Leg { buy, qty, date: Some(d.to_string()), what: w.to_string() },
+            ["sh"] => Leg { buy, qty, date: None, what: "sh".into() },
+            _ => return esc(txt),
+        };
+        legs.push(leg);
+    }
+    // group by expiry (in order of first appearance), strikes ascending within a group
+    let mut dates: Vec<Option<String>> = Vec::new();
+    for l in &legs {
+        if !dates.contains(&l.date) {
+            dates.push(l.date.clone());
+        }
+    }
+    let strike = |w: &str| w.trim_end_matches(['C', 'P']).parse::<f64>().unwrap_or(0.0);
+    legs.sort_by(|a, b| {
+        let (ia, ib) = (dates.iter().position(|d| *d == a.date), dates.iter().position(|d| *d == b.date));
+        ia.cmp(&ib).then(strike(&a.what).total_cmp(&strike(&b.what)))
+    });
+    let mut out = String::from("<span class=\"legs\">");
+    let mut last: Option<&Option<String>> = None;
+    for (i, l) in legs.iter().enumerate() {
+        if last != Some(&l.date) {
+            if i > 0 {
+                out.push_str("<span class=\"lsep\"> · </span>");
+            }
+            if let Some(d) = &l.date {
+                out.push_str(&format!("<span class=\"lx\">{}</span> ", esc(d)));
+            }
+            last = Some(&l.date);
+        } else {
+            out.push(' ');
+        }
+        let q = l.qty.as_deref().filter(|q| *q != "1");
+        let shown = match (q, l.what.as_str()) {
+            (Some(q), "sh") => format!("{} sh", q),
+            (None, "sh") => "shares".into(),
+            (Some(q), w) => format!("{}×{}", q, w),
+            (None, w) => w.to_string(),
+        };
+        let title = format!(
+            "{} {}{}",
+            if l.buy { "Buy" } else { "Sell" },
+            l.qty.as_deref().map(|q| format!("{} ", q)).unwrap_or_default(),
+            match (&l.date, l.what.as_str()) {
+                (Some(d), w) => format!("{} {} {}", d, &w[..w.len() - 1], if w.ends_with('C') { "call" } else { "put" }),
+                (None, _) => "shares".into(),
+            }
+        );
+        out.push_str(&format!("<span class=\"lg {}\" title=\"{}\">{}</span>", if l.buy { "buy" } else { "sell" }, esc(&title), esc(&shown)));
+    }
+    out.push_str("</span>");
+    out
+}
+
 const TICKER_COLS: [&str; 3] = ["Underlying", "Symbol", "symbol"];
 
 /// Table cells: the $ is set in a lighter color with a small gap so it isn't misread as a 5.
@@ -295,12 +378,14 @@ pub fn table(t: &Tbl, tid: &str, pnl_cols: &[&str]) -> String {
                     Cell::F(x) => py_float(*x),
                     Cell::I(i) => i.to_string(),
                     Cell::S(s) => s.clone(),
+                    Cell::T(s, _) => s.clone(),
                 },
             };
             let (txt, sign) = unsign(&txt);
             let raw = match v {
                 Cell::F(x) if !x.is_nan() => py_float(*x),
                 Cell::I(i) => i.to_string(),
+                Cell::T(_, x) if !x.is_nan() => py_float(*x),
                 _ => txt.clone(),
             };
             let mut cls = "";
@@ -320,7 +405,13 @@ pub fn table(t: &Tbl, tid: &str, pnl_cols: &[&str]) -> String {
                 let neg = (sg == '−') != CASH_OUT_COLS.contains(&c.as_str());
                 cls = if neg { " class=\"neg\"" } else { " class=\"pos\"" };
             }
-            let html = if TICKER_COLS.contains(&c.as_str()) { ticker(&txt) } else { cur(&esc(&txt)) };
+            let html = if TICKER_COLS.contains(&c.as_str()) {
+                ticker(&txt)
+            } else if c == "Legs" {
+                legs_html(&txt)
+            } else {
+                cur(&esc(&txt))
+            };
             let html = if ci == 0 { format!("{}{}", std::mem::take(&mut toggle), html) } else { html };
             body.push_str(&format!("<td data-v=\"{}\"{}>{}</td>", esc(&raw), cls, html));
         }

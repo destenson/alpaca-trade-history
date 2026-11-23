@@ -55,7 +55,7 @@ pub fn tip(label: &str) -> Option<&'static str> {
         "Positions" => "Number of positions in the roll chain.",
         "Max gain" => "Most this group can make at expiration ('unlimited' if there's no cap).",
         "Max loss" => "Most this can lose at expiration ('unlimited' if there's no floor, e.g. a naked short call).",
-        "Legs" => "Each leg as quantity, expiry, strike and type: '+1 11/27 220C' = long 1 call, strike 220, expiring Nov 27; '−' = short.",
+        "Legs" => "Each leg as expiry and strike/type, e.g. 11/27 340C = the Nov 27 340 call. Blue = buy (long), red = sell (short); a number before it is the quantity when it isn't 1 (2×345C). Each expiry is written once. Hover a leg for details.",
         "Side" => "Long = bought first, short = sold first.",
         "Breakevens" => "Underlying prices at expiration where P&L crosses zero.",
         "IV" => "Implied volatility: the yearly move the option price implies (from Alpaca's snapshot).",

@@ -73,6 +73,12 @@ th.asc::after { content: " â–²"; font-size: 9px; } th.desc::after { content: " â
 td { padding: 6px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 tr:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
 td.pos { color: var(--gain-text); } td.neg { color: var(--loss-text); }
+/* option legs: expiry once, buys blue, sells red */
+.legs { white-space: nowrap; }
+.legs .lx { color: var(--muted); }
+.legs .lsep { color: var(--muted); }
+.legs .lg.buy { color: var(--gain-text); font-weight: 500; }
+.legs .lg.sell { color: var(--loss-text); font-weight: 500; }
 /* collapsible table groups */
 tr.grp-sum td { font-weight: 600; }
 tr.grp-row td { background: var(--page); }

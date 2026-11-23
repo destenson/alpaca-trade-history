@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 use serde_json::{json, Value};
 
-use super::{dollars_list, iso, jf, jr, jvec, leg, lim, pn, slug, spot_from, table, when, Cell, Report, Tbl, GAIN, LOSS, NEUTRAL, S};
+use super::{dollars_list, jf, jr, jvec, leg, lim, pn, slug, spot_from, table, when, Cell, Report, Tbl, GAIN, LOSS, NEUTRAL, S};
 use crate::analysis::Recon;
 use crate::fillodds::fill_odds;
 use crate::orders::{self as O, PendingOrder};
@@ -187,49 +187,73 @@ impl<'a> Report<'a> {
                 "At your limit price, held to expiration, fees excluded. Undefined-risk sides are left off the bars (see the table). Diamonds: chance the underlying finishes beyond breakeven, from the legs' implied vol (lognormal, no drift, from the latest price) — a market-implied estimate, not a forecast.", true));
         }
 
-        // ---- table
+        // ---- tables: what you pay (entry) and what you can make (if filled); a few columns in both
         let est_col = if market.is_open { "Est. now" } else { "Est. at open" };
-        let mut tb = Tbl::new(&["#", "Underlying", "Strategy", "Legs", "Expires", "DTE", "Limit", "Mid (quoted)", "Natural", "Edge vs mid", est_col, "Edge vs est.", "Max profit", "Max loss", "Reward/risk", "Breakevens", "Prob. profit", "Spot", "TIF", "Placed"])
-            .f("DTE", super::fnum(0))
+        let exp_cell = |o: &PendingOrder| match o.expiry {
+            Some(e) => {
+                let d = (e - today).num_days();
+                let date = if chrono::Datelike::year(&e) == chrono::Datelike::year(&today) { e.format("%m/%d").to_string() } else { e.format("%m/%d/%y").to_string() };
+                Cell::T(format!("{} · {}d", date, d), d as f64)
+            }
+            None => Cell::s("–"),
+        };
+        let mut entry = Tbl::new(&["#", "Underlying", "Strategy", "Legs", "DTE", "Limit", "Mid (quoted)", "Natural", "Edge vs mid", est_col, "Edge vs est.", "TIF", "Placed"])
             .f("Edge vs mid", super::fm(true, 2))
-            .f("Edge vs est.", super::fm(true, 2))
+            .f("Edge vs est.", super::fm(true, 2));
+        let mut payoff = Tbl::new(&["#", "Underlying", "Strategy", "Legs", "Expires", "Limit", "Max profit", "Max loss", "Reward/risk", "Breakevens", "Prob. profit"])
             .f("Max profit", super::flim())
             .f("Max loss", super::flim())
             .f("Reward/risk", super::fnum(2))
-            .f("Prob. profit", super::fp(false, 0))
-            .f("Spot", super::fm(false, 2));
+            .f("Prob. profit", super::fp(false, 0));
         for (k, o) in opening.iter().enumerate() {
             let em = match (o.mid_now, o.net) {
                 (Some(m), Some(n)) if !o.net_is_estimate => (m - n) * o.units * o.mult(),
                 _ => f64::NAN,
             };
-            tb.push(vec![
-                Cell::I(k as i64 + 1),
-                Cell::s(&o.underlying),
-                Cell::s(&o.strategy),
-                Cell::s(o.legs_label()),
-                Cell::s(o.expiry.map(super::isod).unwrap_or_else(|| "–".into())),
-                Cell::F(o.expiry.map(|e| (e - today).num_days() as f64).unwrap_or(f64::NAN)),
-                Cell::s(px(o.net, o.net_is_estimate)),
+            let head = |exp: Cell| vec![Cell::I(k as i64 + 1), Cell::s(&o.underlying), Cell::s(&o.strategy), Cell::s(o.legs_label()), exp, Cell::s(px(o.net, o.net_is_estimate))];
+            let dte = match o.expiry {
+                Some(e) => {
+                    let d = (e - today).num_days();
+                    Cell::T(format!("{}d", d), d as f64)
+                }
+                None => Cell::s("–"),
+            };
+            let placed = match o.submitted {
+                Some(s) => Cell::T(util::to_ny(&s).format("%m/%d %H:%M").to_string(), s.timestamp() as f64),
+                None => Cell::s("–"),
+            };
+            let mut r = head(dte);
+            r.extend([
                 Cell::s(px(o.mid_now, false)),
                 Cell::s(px(o.natural, false)),
                 Cell::F(em),
                 Cell::s(px(o.est_open, false)),
                 Cell::F(edge_est(o)),
+                Cell::s(o.tif.to_uppercase()),
+                placed,
+            ]);
+            entry.push(r);
+            let mut r = head(exp_cell(o));
+            r.extend([
                 Cell::F(o.max_gain),
                 Cell::F(o.max_loss),
                 Cell::F(rr(o)),
                 Cell::s(if o.breakevens.is_empty() { "–".to_string() } else { dollars_list(&o.breakevens) }),
                 Cell::F(o.pop.unwrap_or(f64::NAN)),
-                Cell::F(o.spot.filter(|s| *s != 0.0).unwrap_or(f64::NAN)),
-                Cell::s(o.tif.to_uppercase()),
-                Cell::s(o.submitted.map(|s| iso(&s)).unwrap_or_else(|| "–".into())),
             ]);
+            payoff.push(r);
         }
+        let legs_note = "<b>Legs</b>: blue = buy, red = sell, a quantity only when it isn't 1, each expiry written once.";
         parts.push(format!(
-            "<figure class=\"card wide\"><h3>Open option strategy orders</h3><p class=\"sub\">Net price per spread: debit you pay or credit you receive. Mid/natural are the last quotes (stale while the market is closed); <b>Est.</b> is the model value at {} from the re-pricing inputs above. <b>Edge</b> = dollars your limit is better than the mid / estimate (blue: a better price, but less likely to fill; red: you are paying up).</p>{}</figure>",
+            "<figure class=\"card wide\"><h3>Entry: prices and estimates</h3><p class=\"sub\">Net price per spread: debit you pay or credit you receive. Mid/natural are the last quotes (stale while the market is closed); <b>Est.</b> is the model value at {} from the re-pricing inputs above. <b>Edge</b> = dollars your limit is better than the mid / estimate (blue: a better price, but less likely to fill; red: you are paying up). {}</p>{}</figure>",
             w,
-            table(&tb, "t_orders", &["Edge vs mid", "Edge vs est."])
+            legs_note,
+            table(&entry, "t_orders", &["Edge vs mid", "Edge vs est."])
+        ));
+        parts.push(format!(
+            "<figure class=\"card wide\"><h3>If filled: payoff and odds</h3><p class=\"sub\">Each order held to expiration after filling at your limit, fees excluded. <b>Prob. profit</b> is the market-implied chance the underlying finishes past breakeven at the first expiry (lognormal at the legs' IV, no drift). {}</p>{}</figure>",
+            legs_note,
+            table(&payoff, "t_payoff", &[])
         ));
 
         // ---- chance of filling
