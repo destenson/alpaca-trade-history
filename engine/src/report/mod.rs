@@ -572,6 +572,24 @@ impl<'a> Report<'a> {
         for (k, v) in obj(layout) {
             lay.insert(k, v);
         }
+        // Unified hover lists every trace at the hovered x; a trace whose nearest point is at a slightly
+        // different x (curves on a grid vs. the spot marker) would otherwise show as an "(x, y)" pair.
+        let mut data = data;
+        if lay.get("hovermode").and_then(|v| v.as_str()) == Some("x unified") {
+            let ya = lay.get("yaxis").cloned().unwrap_or(Value::Null);
+            let fmt = if ya.get("tickprefix").and_then(|v| v.as_str()) == Some("$") {
+                "%{y:$,.2f}"
+            } else if ya.get("tickformat").and_then(|v| v.as_str()).map(|f| f.contains('%')).unwrap_or(false) {
+                if ya.get("tickformat").and_then(|v| v.as_str()).map(|f| f.starts_with('+')).unwrap_or(false) { "%{y:+.1%}" } else { "%{y:.1%}" }
+            } else {
+                "%{y:,.2f}"
+            };
+            for t in data.iter_mut() {
+                if t.get("hovertemplate").is_none() && t.get("type").and_then(|v| v.as_str()) == Some("scatter") {
+                    t["hovertemplate"] = json!(fmt);
+                }
+            }
+        }
         self.figs.insert(fid.to_string(), json!({"data": data, "layout": Value::Object(lay)}));
         let head = if title.is_empty() { String::new() } else { format!("<h3>{}</h3>", esc(title)) };
         let sub = if subtitle.is_empty() { String::new() } else { format!("<p class=\"sub\">{}</p>", subtitle) };

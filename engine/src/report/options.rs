@@ -542,7 +542,7 @@ impl<'a> Report<'a> {
                     data.push(json!({"type": "scatter", "mode": "lines", "name": format!("Closing order ({}) at {}: {} if filled", what, price, money(pnl, true, 2)),
                         // every x of the chart, so the unified hover lists it wherever you point
                         "x": super::jraw(&whole.x), "y": whole.x.iter().map(|_| jr(pnl, 2)).collect::<Vec<_>>(), "line": {"color": "var:series-6", "width": 2, "dash": "dashdot"},
-                        "hovertemplate": format!("closing order at {}: %{{y:$,.2f}}<extra></extra>", price)}));
+                        "hovertemplate": "%{y:$,.2f}"}));
                     // crossings of today's value curve with that P&L: roughly where the order would fill now
                     let mut cx = Vec::new();
                     if xs.len() == now.len() {
