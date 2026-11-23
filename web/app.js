@@ -664,12 +664,12 @@ function reloadForUpdate() {
   try { sessionStorage.setItem('aa-resume', JSON.stringify({ tab: currentTab, view: currentView })); } catch (e) { /* ignore */ }
   location.reload();
 }
-async function checkForUpdate(noticeOnly = false) {
+async function checkForUpdate() {
   if (refreshing || !(await newerBuild())) return false;
   const st = $('refreshStatus');
-  if (noticeOnly && st.querySelector('.linkbtn')) return true;
+  if (st.querySelector('.linkbtn')) return true;       // already offered
   st.classList.remove('err');
-  if (!noticeOnly && !$('lock').hidden) {              // kept unlocked: the reload reopens the report by itself
+  if (!$('lock').hidden) {              // kept unlocked: the reload reopens the report by itself
     st.textContent = '· A new version is live: reloading…';
     setTimeout(reloadForUpdate, 600);
   } else {
@@ -682,10 +682,8 @@ async function checkForUpdate(noticeOnly = false) {
   }
   return true;
 }
-// a tab left open: look for a new version every few minutes and offer the reload (never reload by itself)
-setInterval(() => {
-  if (document.visibilityState === 'visible' && !$('result').hidden) checkForUpdate(true);
-}, 5 * 60e3);
+// backup for a tab left open: look for a new version every few minutes (reloads by itself when it can)
+setInterval(() => { if (!$('result').hidden) checkForUpdate(); }, 5 * 60e3);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && !$('result').hidden) checkForUpdate();
 });
