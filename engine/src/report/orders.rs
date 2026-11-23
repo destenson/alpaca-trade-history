@@ -313,7 +313,7 @@ impl<'a> Report<'a> {
             None => Cell::s("–"),
         };
         cols.extend(hz.iter());
-        cols.extend(["Before expiry", "Good until"]);
+        cols.extend(["Before expiry", "Exp. profit", "Good until"]);
         let pf = |c: &Cell| {
             if let Cell::S(t) = c {
                 return t.clone();
@@ -333,6 +333,7 @@ impl<'a> Report<'a> {
         for h in hz.iter().chain(["Before expiry"].iter()) {
             ft = ft.f(h, pf);
         }
+        ft = ft.f("Exp. profit", super::flim());
         for (k, o) in opening.iter().enumerate() {
             if o.unpriced() {
                 let mut row = vec![Cell::I(k as i64 + 1), Cell::s(&o.underlying), strat(o), Cell::s(o.legs_label()), dte_cell(o), Cell::s(o.tif.to_uppercase()),
@@ -349,6 +350,7 @@ impl<'a> Report<'a> {
                 } else {
                     "end of session".into()
                 };
+                row.push(Cell::F(exp_profit(o)));
                 row.push(Cell::s(good_until));
                 ft.push(row);
                 continue;
@@ -368,6 +370,7 @@ impl<'a> Report<'a> {
                 row.push(Cell::F(h.unwrap_or(f64::NAN)));
             }
             row.push(Cell::F(f.expiry.unwrap_or(f64::NAN)));
+            row.push(Cell::F(exp_profit(o)));
             row.push(Cell::s(if f.gtc { super::isod(f.last_day) } else { "end of session".into() }));
             ft.push(row);
         }
