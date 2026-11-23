@@ -536,7 +536,7 @@ impl<'a> Report<'a> {
         let more = if split { "" } else { " Legs with several contracts are kept whole here (too many contracts to split every way)." };
         format!(
             "<figure class=\"card wide\"><h3>{}: {} way{} to read {} open leg{}{}</h3><p class=\"sub\">{}</p><label class=\"pick\">Interpretation <select class=\"interp\" data-box=\"ib_{}\">{}</select></label><div id=\"ib_{}\">{}</div><p class=\"note\">Every reading is the same legs, so total P&L is identical. What changes is how risk is grouped: per-group max loss and breakevens, and what you'd be left holding if you closed one group. Expiration curves value all legs at intrinsic, ignoring time value left on later-dated legs of calendars/diagonals.{}{}</p></figure>",
-            esc(und),
+            super::ticker(und),
             rs.len(),
             if rs.len() != 1 { "s" } else { "" },
             n_legs,

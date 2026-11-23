@@ -791,7 +791,48 @@ window.addEventListener('message', (e) => {
   }
   if (e.data.type === 'aa-tab' && typeof e.data.tab === 'string' && /^[a-z]{1,30}$/.test(e.data.tab)) currentTab = e.data.tab;
   if (e.data.type === 'aa-theme' && (e.data.theme === 'light' || e.data.theme === 'dark')) setTheme(e.data.theme);
+  if (e.data.type === 'aa-tv') showChart(e.data);
+  if (e.data.type === 'aa-tv-hide') hideChartSoon();
 });
+
+// TradingView mini chart for a ticker's chart icon in the report. Drawn here, over the report frame, because
+// the sandboxed frame has no origin and TradingView's data connection refuses it. Only a symbol and the
+// icon's position come from the frame; both are validated.
+let chartPop = null, chartHideT = null;
+function showChart(d) {
+  const r = d.rect || {};
+  if (typeof d.symbol !== 'string' || !/^([A-Z]{2,8}:)?[A-Z0-9.]{1,10}$/.test(d.symbol)) return;
+  if (!['left', 'top', 'right', 'bottom'].every((k) => Number.isFinite(r[k]))) return;
+  clearTimeout(chartHideT);
+  if (!chartPop) {
+    chartPop = document.createElement('div');
+    chartPop.id = 'tvpop';
+    chartPop.addEventListener('mouseenter', () => clearTimeout(chartHideT));
+    chartPop.addEventListener('mouseleave', hideChartSoon);
+    document.body.append(chartPop);
+  }
+  if (chartPop.dataset.symbol !== d.symbol || chartPop.hidden) {
+    const cfg = { symbol: d.symbol, width: '100%', height: '100%', locale: 'en', dateRange: '3M',
+      colorTheme: d.theme === 'dark' ? 'dark' : 'light', isTransparent: false, autosize: true, largeChartUrl: '' };
+    const f = document.createElement('iframe');
+    f.title = d.symbol + ' chart (TradingView)';
+    f.referrerPolicy = 'no-referrer';
+    f.src = 'https://www.tradingview-widget.com/embed-widget/mini-symbol-overview/?locale=en#' + encodeURIComponent(JSON.stringify(cfg));
+    chartPop.replaceChildren(f);
+    chartPop.dataset.symbol = d.symbol;
+  }
+  chartPop.hidden = false;
+  const fr = $('frame').getBoundingClientRect();
+  const w = chartPop.offsetWidth, h = chartPop.offsetHeight;
+  const left = fr.left + r.left, top = fr.top + r.top, bottom = fr.top + r.bottom;
+  chartPop.style.left = Math.max(8, Math.min(left, innerWidth - w - 8)) + 'px';
+  chartPop.style.top = (bottom + h + 12 < innerHeight ? bottom + 6 : Math.max(8, top - h - 6)) + 'px';
+}
+function hideChartSoon() {
+  clearTimeout(chartHideT);
+  chartHideT = setTimeout(() => { if (chartPop) { chartPop.hidden = true; chartPop.replaceChildren(); delete chartPop.dataset.symbol; } }, 250);
+}
+addEventListener('scroll', () => { if (chartPop && !chartPop.hidden) hideChartSoon(); }, { passive: true });
 
 // ------------------------------------------------------------------------------ wiring
 $('origin').textContent = location.origin;

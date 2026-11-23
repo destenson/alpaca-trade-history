@@ -473,7 +473,7 @@ impl<'a> Report<'a> {
                 "<tr class=\"{}\" data-und=\"{}\"><td><b>{}</b></td><td>{}</td><td>{}</td><td class=\"rp-move\">{}</td><td>{}</td><td><input class=\"rp-spot\" type=\"number\" inputmode=\"decimal\" min=\"0\" step=\"any\" value=\"{}\" data-default=\"{}\" data-ref=\"{:.6}\" aria-label=\"{} price for estimates\"></td><td><input class=\"rp-iv\" type=\"number\" inputmode=\"decimal\" step=\"5\" min=\"-90\" max=\"300\" value=\"0\" aria-label=\"{} IV change in percent\"> %</td><td><button type=\"button\" class=\"rp-reset\">Reset</button></td></tr>",
                 if u.stale() { "stale" } else { "" },
                 esc(und),
-                esc(und),
+                super::ticker(und),
                 super::cur(&money(u.refp.unwrap_or(f64::NAN), false, 2)),
                 super::cur(&lt),
                 pct(u.mv(), true, 1),

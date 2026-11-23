@@ -89,6 +89,15 @@ td .cur { color: var(--muted); margin-right: 0.18em; font-weight: 400; }
   line-height: 1.4; color: var(--ink); background: var(--surface); border: 1px solid var(--axis);
   box-shadow: 0 6px 20px rgba(0,0,0,0.18); pointer-events: none; font-weight: 400; text-transform: none; letter-spacing: 0; }
 #tip[hidden] { display: none; }
+/* tickers: link to Alpaca's trade page; the chart icon links to TradingView and previews a mini chart */
+a.tk { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--muted); }
+a.tk:hover, a.tk:focus-visible { color: var(--series-1); border-bottom-color: currentColor; }
+a.tv { text-decoration: none; font-size: 0.85em; margin-left: 0.3em; opacity: 0.6; }
+a.tv:hover, a.tv:focus-visible { opacity: 1; }
+#tvpop { position: fixed; z-index: 60; width: 380px; height: 230px; max-width: calc(100vw - 16px); border-radius: 10px;
+  overflow: hidden; background: var(--surface); border: 1px solid var(--grid); box-shadow: 0 8px 28px rgba(0,0,0,.25); }
+#tvpop[hidden] { display: none; }
+#tvpop iframe { width: 100%; height: 100%; border: 0; display: block; }
 .tilelink { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 figure.card[id] { scroll-margin-top: 64px; }
 .tilelink:hover { color: var(--ink); }
@@ -209,7 +218,7 @@ document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('
   box.querySelectorAll('#' + sel.value + ' .plot').forEach(el => draw(el.id));
 }));
 // Re-pricing of open orders (Orders tab): Black-Scholes in the page so edited prices / IV changes
-// update the estimates, table cells and charts for that underlying. Mirrors alpaca_analyzer.reprice.
+// update the estimates, table cells and charts for that underlying. Mirrors engine/src/reprice.rs.
 (function () {
   const holder = document.getElementById('rp-data');
   if (!holder) return;
@@ -491,6 +500,71 @@ for (const [id, spec] of Object.entries(FIGS)) {
 if (!EMBEDDED) {
   try { for (const id of JSON.parse(localStorage.getItem(LOG_KEY) || '[]')) setLog(id, true, false); } catch (e) { /* none */ }
 }
+// Chart icons next to tickers: hovering (or focusing) one shows TradingView's mini chart for it in a small
+// popup; clicking opens the full TradingView chart in a new tab. The chart frame is only created on hover.
+// Inside the web app's sandboxed frame TradingView can't connect (the frame has no origin), so the host page
+// draws the popup: this frame only tells it which symbol and where the icon is.
+(() => {
+  let pop = null, cur = null, showT = null, hideT = null;
+  const dark = () => {
+    const t = document.documentElement.dataset.theme;
+    return t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  };
+  function show(a) {
+    clearTimeout(hideT);
+    if (cur === a) return;
+    cur = a;
+    if (EMBEDDED) {
+      const r = a.getBoundingClientRect();
+      parent.postMessage({ type: 'aa-tv', symbol: a.dataset.tv, theme: dark() ? 'dark' : 'light',
+        rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom } }, '*');
+      return;
+    }
+    if (!pop) {
+      pop = document.createElement('div'); pop.id = 'tvpop'; pop.hidden = true;
+      pop.addEventListener('mouseenter', () => clearTimeout(hideT));
+      pop.addEventListener('mouseleave', hideSoon);
+      document.body.append(pop);
+    }
+    pop.replaceChildren(tvFrame(a.dataset.tv, dark()));
+    pop.hidden = false;
+    const r = a.getBoundingClientRect(), w = pop.offsetWidth, h = pop.offsetHeight;
+    pop.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + 'px';
+    pop.style.top = (r.bottom + h + 12 < innerHeight ? r.bottom + 6 : Math.max(8, r.top - h - 6)) + 'px';
+  }
+  function hide() {
+    cur = null;
+    if (EMBEDDED) parent.postMessage({ type: 'aa-tv-hide' }, '*');
+    else if (pop) { pop.hidden = true; pop.replaceChildren(); }
+  }
+  function hideSoon() {
+    clearTimeout(showT); clearTimeout(hideT);
+    if (EMBEDDED) hide();                 // the host waits a moment, so the mouse can move onto its popup
+    else hideT = setTimeout(hide, 250);
+  }
+  const icon = (e) => e.target.closest && e.target.closest('a.tv');
+  document.addEventListener('mouseover', (e) => {
+    const a = icon(e);
+    if (!a) return;
+    clearTimeout(showT); clearTimeout(hideT);
+    showT = setTimeout(() => show(a), 150);       // don't load charts while the mouse just sweeps past
+  });
+  document.addEventListener('mouseout', (e) => { const a = icon(e); if (a && !a.contains(e.relatedTarget)) hideSoon(); });
+  document.addEventListener('focusin', (e) => { const a = icon(e); if (a) show(a); });
+  document.addEventListener('focusout', (e) => { if (icon(e)) hideSoon(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
+  addEventListener('scroll', () => { if (cur) hide(); }, { passive: true, capture: true });
+})();
+function tvFrame(symbol, dark) {
+  const cfg = { symbol, width: '100%', height: '100%', locale: 'en', dateRange: '3M', colorTheme: dark ? 'dark' : 'light',
+    isTransparent: false, autosize: true, largeChartUrl: '' };
+  const f = document.createElement('iframe');
+  f.title = symbol + ' chart (TradingView)';
+  f.referrerPolicy = 'no-referrer';
+  f.src = 'https://www.tradingview-widget.com/embed-widget/mini-symbol-overview/?locale=en#' + encodeURIComponent(JSON.stringify(cfg));
+  return f;
+}
+
 // in-report links (e.g. a tile pointing at a table): scroll without touching the URL (the hash is the tab)
 document.addEventListener('click', (e) => {
   const a = e.target.closest('a.tilelink');

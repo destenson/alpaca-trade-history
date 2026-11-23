@@ -178,6 +178,61 @@ pub fn unsign(txt: &str) -> (String, Option<char>) {
     (rest.replace("$ ", "$"), Some(if first == '+' { '+' } else { '−' }))
 }
 
+// ------------------------------------------------------------------------------ ticker links
+thread_local! {
+    /// underlying -> TradingView exchange prefix, from the exchanges Alpaca reports for open positions
+    static EXCHANGES: std::cell::RefCell<std::collections::HashMap<String, String>> = Default::default();
+}
+
+pub fn set_exchanges(positions: &[Value]) {
+    EXCHANGES.with(|m| {
+        let mut m = m.borrow_mut();
+        m.clear();
+        for p in positions {
+            let sym = crate::jv::s(p, "symbol");
+            let tv = match crate::jv::s(p, "exchange").to_uppercase().as_str() {
+                "NASDAQ" => "NASDAQ",
+                "NYSE" => "NYSE",
+                "ARCA" | "NYSEARCA" | "AMEX" => "AMEX",
+                "BATS" => "CBOE",
+                "OTC" => "OTC",
+                _ => continue,
+            };
+            if parse_occ(&sym).is_none() {
+                m.insert(sym, tv.to_string());
+            }
+        }
+    });
+}
+
+fn tv_symbol(und: &str) -> String {
+    EXCHANGES.with(|m| m.borrow().get(und).map(|e| format!("{}:{}", e, und))).unwrap_or_else(|| und.to_string())
+}
+
+fn is_ticker(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 10 && s.bytes().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'.' || c == b'/')
+        && s.bytes().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
+}
+
+/// ``text`` (a ticker or an option symbol) linked to Alpaca's trade page for its underlying, followed by a
+/// chart icon linking to TradingView (hovering it shows a mini chart). Plain escaped text if it isn't a ticker.
+pub fn ticker(text: &str) -> String {
+    let und = crate::occ::underlying_of(text);
+    if !is_ticker(&und) {
+        return esc(text);
+    }
+    let tv = tv_symbol(&und);
+    format!(
+        "<a class=\"tk\" href=\"https://app.alpaca.markets/trade/{u}?asset_class=stocks\" target=\"_blank\" rel=\"noopener noreferrer\" title=\"Trade {u} on Alpaca\">{t}</a><a class=\"tv\" href=\"https://www.tradingview.com/chart/?symbol={q}\" target=\"_blank\" rel=\"noopener noreferrer\" data-tv=\"{tv}\" aria-label=\"{u} chart on TradingView\">📈</a>",
+        u = esc(&und),
+        t = esc(text),
+        q = tv.replace(':', "%3A"),
+        tv = esc(&tv)
+    )
+}
+
+const TICKER_COLS: [&str; 3] = ["Underlying", "Symbol", "symbol"];
+
 /// Table cells: the $ is set in a lighter color with a small gap so it isn't misread as a 5.
 pub fn cur(escaped: &str) -> String {
     escaped.replace('$', "<span class=\"cur\">$</span>")
@@ -233,7 +288,8 @@ pub fn table(t: &Tbl, tid: &str, pnl_cols: &[&str]) -> String {
                 let neg = (sg == '−') != CASH_OUT_COLS.contains(&c.as_str());
                 cls = if neg { " class=\"neg\"" } else { " class=\"pos\"" };
             }
-            body.push_str(&format!("<td data-v=\"{}\"{}>{}</td>", esc(&raw), cls, cur(&esc(&txt))));
+            let html = if TICKER_COLS.contains(&c.as_str()) { ticker(&txt) } else { cur(&esc(&txt)) };
+            body.push_str(&format!("<td data-v=\"{}\"{}>{}</td>", esc(&raw), cls, html));
         }
         body.push_str("</tr>");
     }
@@ -337,6 +393,7 @@ pub struct Report<'a> {
 
 impl<'a> Report<'a> {
     pub fn new(a: &'a Analysis, now: Ts, generated: String) -> Report<'a> {
+        set_exchanges(&a.bundle.positions);
         Report {
             a,
             figs: Map::new(),
