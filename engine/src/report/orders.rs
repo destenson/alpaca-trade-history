@@ -698,7 +698,83 @@ impl<'a> Report<'a> {
             "<figure class=\"card wide\"><h3>Open positions</h3><p class=\"sub\">Avg cost = fee-inclusive cost basis ÷ quantity from the ledger; “Broker avg” is Alpaca’s figure for comparison.</p>{}</figure>",
             table(&tb, "t_pos", &["Unrealized", "%"])
         ));
+        if let Some(t) = self.closing_orders() {
+            parts.push(t);
+        }
         self.section("positions", "Positions", parts.concat());
+    }
+
+    /// Open orders with at least one leg that closes (part of) an open position: what they close, the
+    /// prices, and the P&L if filled at the limit against the fee-inclusive cost basis.
+    fn closing_orders(&mut self) -> Option<String> {
+        let a = self.a;
+        let mut allo = O::parse_orders(&a.bundle.orders);
+        if allo.is_empty() {
+            return None;
+        }
+        let today = self.today();
+        let market = self.market().cloned();
+        O::evaluate(&mut allo, &a.ledger, &a.open_positions, &a.bundle.option_snapshots, &|u| spot_from(a, u), today, market.as_ref());
+        let pos_of = |sym: &str| a.open_positions.iter().find(|p| p.symbol == sym && p.qty != 0.0);
+        let mut tb = Tbl::new(&["#", "Underlying", "Legs", "Closes", "Order", "Limit", "Mid (quoted)", "Natural", "Cost basis", "P&L if filled"])
+            .f("Cost basis", super::fm(false, 2))
+            .f("P&L if filled", super::fm(true, 2));
+        let mut k = 0;
+        for o in &allo {
+            let units = o.units;
+            let mut closes = Vec::new();
+            let mut basis = 0.0;
+            let mut all_close = true;
+            for l in &o.legs {
+                let q = l.ratio * units;                      // signed: + buy, − sell
+                match pos_of(&l.symbol).filter(|p| (p.qty > 0.0) != (q > 0.0)) {
+                    Some(p) => {
+                        let closed = q.abs().min(p.qty.abs()) * p.qty.signum();
+                        basis += p.cost_basis / p.qty * closed;
+                        if q.abs() > p.qty.abs() + 1e-9 {
+                            all_close = false;            // also opens the other way
+                        }
+                        let sign = if closed > 0.0 { "long" } else { "short" };
+                        let what = if p.is_option { leg(&p.symbol) } else { format!("{} sh", p.symbol) };
+                        let part = if closed.abs() + 1e-9 < p.qty.abs() { format!(" (of {})", util::g(p.qty.abs())) } else { String::new() };
+                        closes.push(format!("{} {} {}{}", sign, util::g(closed.abs()), what, part));
+                    }
+                    None => all_close = false,
+                }
+            }
+            if closes.is_empty() {
+                continue;
+            }
+            k += 1;
+            let kind = match (o.order_type.as_str(), o.stop) {
+                (t, Some(sp)) if t.contains("stop") => format!("{} · stop ${} · {}", t.replace('_', " "), commas(sp, 2), o.tif.to_uppercase()),
+                (t, _) => format!("{} · {}", t.replace('_', " "), o.tif.to_uppercase()),
+            };
+            // cash at the limit (a credit is cash in) less the cost basis of what it closes
+            let pnl = match o.net {
+                Some(n) if all_close && !o.net_is_estimate => -n * units * o.mult() - basis,
+                _ => f64::NAN,
+            };
+            tb.push(vec![
+                Cell::I(k),
+                Cell::s(&o.underlying),
+                Cell::s(o.legs_label()),
+                Cell::s(closes.join(", ")),
+                Cell::s(kind),
+                limit_cell(o),
+                Cell::s(px(o.mid_now, false)),
+                price_cell(o, o.natural),
+                Cell::F(basis),
+                Cell::F(pnl),
+            ]);
+        }
+        if tb.rows.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "<figure class=\"card wide\"><h3>Open orders that close positions</h3><p class=\"sub\">Every open order with a leg that closes (part of) a position above. <b>Cost basis</b> is the fee-inclusive basis of what it closes; <b>P&amp;L if filled</b> = cash at your limit − that basis, before closing fees (– for stop/market orders, or when a leg also opens a new position). Click a limit or natural price to change the order.</p>{}</figure>",
+            table(&tb, "t_closing", &["P&L if filled"])
+        ))
     }
 
     pub fn notes(&mut self) {
