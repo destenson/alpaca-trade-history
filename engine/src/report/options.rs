@@ -1,6 +1,6 @@
 //! Options tab: strategy statistics, reinvest card, open positions read every way.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::NaiveDate;
 use indexmap::IndexMap;
@@ -197,6 +197,7 @@ impl<'a> Report<'a> {
             .f("Return on risk", super::fp(true, 0));
         let mut rows: Vec<&ComboRow> = c.iter().collect();
         rows.sort_by(|x, y| y.open_time.cmp(&x.open_time));
+        let closers = if self.share { HashMap::new() } else { self.close_targets() };
         for r in rows {
             tb.push(vec![
                 Cell::s(iso(&r.open_time)),
@@ -208,11 +209,14 @@ impl<'a> Report<'a> {
                 Cell::F(r.max_risk),
                 Cell::s(r.outcome),
                 Cell::F(r.hold_days),
-                Cell::F(r.pnl),
+                match closers.get(&r.combo_id) {
+                    Some((id, refs)) => Cell::OrderF(r.pnl, id.clone(), refs.clone()),
+                    None => Cell::F(r.pnl),
+                },
                 Cell::F(r.ror),
             ]);
         }
-        let mut sub = "Net premium: blue = credit received, red = debit paid, fees included. Open positions include unrealized P&L.";
+        let mut sub = "Net premium: blue = credit received, red = debit paid, fees included. Open positions include unrealized P&L; click an open position's P&L to close it (or change its closing order) at a chosen profit.";
         if self.share {
             tb.drop_cols(&["Net premium", "Max risk", "P&L"]);
             sub = "Return on risk = P&L ÷ max risk at entry. Per-position dollar amounts are omitted in the shared view.";
@@ -560,4 +564,82 @@ impl<'a> Report<'a> {
             odd_note
         )
     }
+}
+
+impl<'a> Report<'a> {
+    /// For each open option position (combo): what the change-price popup needs to close it at a chosen
+    /// profit. If an open order already closes exactly its legs, that order (to change); otherwise a new
+    /// closing order ("new:<combo>") with the legs reversed. Profit is measured against the open lots'
+    /// cost, like the unrealized P&L.
+    fn close_targets(&self) -> HashMap<usize, (String, String)> {
+        let a = self.a;
+        let mark: HashMap<&str, f64> = a.open_positions.iter().map(|p| (p.symbol.as_str(), p.price)).collect();
+        let mut legs: BTreeMap<usize, BTreeMap<String, (f64, f64, f64)>> = BTreeMap::new();   // qty, cost, value
+        for (sym, lots) in &a.ledger.open_lots {
+            if crate::occ::parse_occ(sym).is_none() {
+                continue;
+            }
+            for l in lots {
+                let Some(cid) = l.combo_id else { continue };
+                let e = legs.entry(cid).or_default().entry(sym.clone()).or_insert((0.0, 0.0, 0.0));
+                e.0 += l.qty;
+                e.1 += l.qty * l.price * l.multiplier;
+                e.2 += l.qty * mark.get(sym.as_str()).copied().unwrap_or(f64::NAN) * l.multiplier;
+            }
+        }
+        let orders = O::parse_orders(&a.bundle.orders);
+        let mut out = HashMap::new();
+        for (cid, lg) in legs {
+            let lg: Vec<(String, f64, f64, f64)> = lg.into_iter().filter(|(_, v)| v.0.abs() > 1e-9).map(|(k, v)| (k, v.0, v.1, v.2)).collect();
+            if lg.is_empty() {
+                continue;
+            }
+            let basis: f64 = lg.iter().map(|x| x.2).sum();
+            let value: f64 = lg.iter().map(|x| x.3).sum();
+            let und = crate::occ::underlying_of(&lg[0].0);
+            let leg_txt = lg.iter().map(|x| format!("{}{} {}", if x.1 > 0.0 { "+" } else { "" }, util::g(x.1), super::leg(&x.0))).collect::<Vec<_>>().join(", ");
+            // an open limit order that closes exactly these legs
+            let exact = orders.iter().find(|o| {
+                o.order_type == "limit"
+                    && o.legs.len() == lg.len()
+                    && o.legs.iter().all(|l| lg.iter().any(|x| x.0 == l.symbol && (l.ratio * o.units + x.1).abs() < 1e-9))
+            });
+            let mut refs = json!({"basis": jr(basis, 2), "label": format!("{} close · {}", und, leg_txt)});
+            if !value.is_nan() {
+                refs["target"] = jr(value - basis, 2);
+            }
+            let id = match exact {
+                Some(o) => {
+                    refs["scale"] = jf(o.units * 100.0);
+                    o.id.clone()
+                }
+                None => {
+                    // open orders that already close some of these legs: Alpaca may refuse a second one
+                    let overlap: Vec<String> = orders
+                        .iter()
+                        .filter(|o| o.legs.iter().any(|l| lg.iter().any(|x| x.0 == l.symbol && (l.ratio > 0.0) != (x.1 > 0.0))))
+                        .map(|o| format!("{} at {}", o.legs_label(), o.net.map(|n| format!("${:.2} {}", n.abs(), if n < 0.0 { "credit" } else { "debit" })).unwrap_or_else(|| "market".into())))
+                        .collect();
+                    if !overlap.is_empty() {
+                        refs["overlap"] = json!(overlap.join("; "));
+                    }
+                    let q = lg.iter().map(|x| x.1.abs().round() as u64).fold(0, gcd).max(1) as f64;
+                    refs["scale"] = jf(q * 100.0);
+                    refs["new"] = json!({"qty": q, "legs": lg.iter().map(|x| json!({
+                        "symbol": x.0, "side": if x.1 > 0.0 { "sell" } else { "buy" },
+                        "position_intent": if x.1 > 0.0 { "sell_to_close" } else { "buy_to_close" },
+                        "ratio_qty": (x.1.abs() / q).round()})).collect::<Vec<_>>()});
+                    format!("new:{}", cid)
+                }
+            };
+            if !id.is_empty() {
+                out.insert(cid, (id, refs.to_string()));
+            }
+        }
+        out
+    }
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { gcd(b, a % b) }
 }

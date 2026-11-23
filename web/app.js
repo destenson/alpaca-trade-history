@@ -728,6 +728,7 @@ let refreshing = false;
 
 let lastMeta = null;
 let lastOrders = [];
+let lastPositions = [];
 let lastCancelled = [];    // option limit orders cancelled in the last day and not placed again (Re-place)       // open orders as Alpaca returned them, for the change-price popup
 async function analyze(creds, force = false) {
   const benchmarks = ($('bench').value || 'SPY QQQ').toUpperCase().split(/[\s,]+/).filter(Boolean);
@@ -735,6 +736,7 @@ async function analyze(creds, force = false) {
   const { bundle, meta } = await fetchBundle(creds, benchmarks, force);
   lastMeta = meta;
   lastOrders = bundle.orders || [];
+  lastPositions = bundle.positions || [];
   lastCancelled = await recentCancels(new Alpaca(creds), lastOrders);
   step('Starting the analysis engine…');
   const mod = await engine;
@@ -1018,9 +1020,35 @@ function legText(o) {
     return `${l.side === 'sell' ? 'sell' : 'buy'} ${q !== 1 ? q + '× ' : ''}${what}`;
   }).join(', ');
 }
+// A new order closing an open option position, from the report's "All option strategies" P&L. Every leg
+// must close (part of) a position Alpaca lists, so the frame can't ask for anything else.
+function closingOrderFrom(n) {
+  if (!n || typeof n !== 'object' || !Array.isArray(n.legs) || !n.legs.length || n.legs.length > 4) return null;
+  const qty = n.qty;
+  if (!Number.isInteger(qty) || qty < 1 || qty > 10000) return null;
+  const legs = [];
+  for (const l of n.legs) {
+    if (!l || typeof l.symbol !== 'string' || !OCC.test(l.symbol) || !Number.isInteger(l.ratio_qty) || l.ratio_qty < 1) return null;
+    const p = lastPositions.find((x) => x.symbol === l.symbol);
+    const pq = p ? +p.qty : 0;
+    const side = pq > 0 ? 'sell' : 'buy';
+    if (!p || l.side !== side || l.ratio_qty * qty > Math.abs(pq) + 1e-9) return null;
+    legs.push({ symbol: l.symbol, side, position_intent: side === 'sell' ? 'sell_to_close' : 'buy_to_close', ratio_qty: String(l.ratio_qty) });
+  }
+  const base = { id: null, synthetic: true, type: 'limit', time_in_force: 'gtc', limit_price: '0', status: 'new', qty: String(qty) };
+  return legs.length > 1 ? { ...base, order_class: 'mleg', legs }
+    : { ...base, order_class: 'simple', symbol: legs[0].symbol, side: legs[0].side, position_intent: legs[0].position_intent, qty: String(qty * +legs[0].ratio_qty) };
+}
 function openOrderDialog(d, place = false) {
-  if (typeof d.id !== 'string' || !/^[0-9a-f-]{8,64}$/i.test(d.id)) return;
-  const o = (place ? lastCancelled : lastOrders).find((x) => x.id === d.id);
+  if (typeof d.id !== 'string') return;
+  let o;
+  if (/^new:\d{1,9}$/.test(d.id)) {
+    o = closingOrderFrom(d.ref?.new);
+    place = true;
+  } else {
+    if (!/^[0-9a-f-]{8,64}$/i.test(d.id)) return;
+    o = (place ? lastCancelled : lastOrders).find((x) => x.id === d.id);
+  }
   const dlg = $('ordDlg');
   $('ordErr').hidden = true; $('ordConfirm').hidden = true;
   $('ordGo').textContent = 'Review change'; $('ordGo').disabled = false; $('ordMode').hidden = true;
@@ -1041,10 +1069,12 @@ function openOrderDialog(d, place = false) {
   const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
   ordCur = { id: o.id, mleg, qty, lim, und, order: o, recreate: !place && o.status === 'accepted', place, maxloss: num(ref.maxloss) };
   const label = typeof ref.label === 'string' ? ref.label.slice(0, 160) : `${und} · ${legText(o)}`;
+  if (o.synthetic) ordCur.closing = true;
+  ordCur.overlap = o.synthetic && typeof ref.overlap === 'string' ? ref.overlap.slice(0, 300) : '';
   $('ordWhat').textContent = `${label} · ${qty} ${mleg ? (qty === 1 ? 'spread' : 'spreads') : (qty === 1 ? 'contract' : 'contracts')} · ${(o.time_in_force || '').toUpperCase()} · ${o.status}` +
     (lastCreds?.env === 'paper' ? ' · paper account' : ' · LIVE account');
-  const refs = [[place ? 'was' : 'now', mleg ? lim : (o.side === 'sell' ? -lim : lim)], ['mid', num(ref.mid)], ['natural', num(ref.natural)], ['est.', num(ref.est)]]
-    .filter(([, v]) => v !== null).map(([k, v]) => `${k} ${dc(v, true)}`);
+  const refs = [[o.synthetic ? null : place ? 'was' : 'now', mleg ? lim : (o.side === 'sell' ? -lim : lim)], ['mid', num(ref.mid)], ['natural', num(ref.natural)], ['est.', num(ref.est)]]
+    .filter(([k, v]) => k !== null && v !== null).map(([k, v]) => `${k} ${dc(v, true)}`);
   $('ordRefs').textContent = refs.join(' · ');
   // a clicked natural / estimate price prefills the input (debit positive, like the report shows it)
   let pre = num(ref.prefill);
@@ -1055,6 +1085,10 @@ function openOrderDialog(d, place = false) {
   $('ordSideL').hidden = !mleg;
   $('ordPx').previousSibling.textContent = mleg ? 'New limit (per spread)' : `New limit (per contract, ${o.side === 'sell' ? 'sell' : 'buy'})`;
   setOrdMode();
+  if (ordCur.overlap) {     // kept in the reference line so it stays visible while typing
+    $('ordRefs').textContent = `⚠ Already being closed by another open order: ${ordCur.overlap}. Alpaca may refuse a second ` +
+      'closing order for the same contracts; change or cancel that one instead (Positions tab).';
+  }
   if (NOT_REPLACEABLE[o.status] && !ordCur.recreate) {
     $('ordErr').textContent = `Alpaca can't change an order while it is ${NOT_REPLACEABLE[o.status]}. Try again in a moment.`;
     $('ordErr').hidden = false;
@@ -1062,7 +1096,7 @@ function openOrderDialog(d, place = false) {
   dlg.showModal();
   // closing orders: work from a target profit too (cash at the limit − cost basis of what it closes)
   const basis = num(ref.basis), scale = num(ref.scale);
-  ordCur.basis = basis !== null && scale > 0 && !place ? basis : null;
+  ordCur.basis = basis !== null && scale > 0 && (!place || o.synthetic) ? basis : null;
   ordCur.scale = scale;
   $('ordProfitRow').hidden = ordCur.basis === null;
   $('ordKill').hidden = place;
@@ -1083,7 +1117,7 @@ function setOrdMode() {
   $('ordGo').disabled = false;
   $('ordGo').textContent = ordCur?.place ? 'Review new order' : ordCur?.recreate ? 'Review cancel & re-place' : 'Review change';
   $('ordMode').hidden = !ordCur?.recreate;
-  $('ordTitle').textContent = ordCur?.place ? 'Place this order again' : 'Change limit price';
+  $('ordTitle').textContent = ordCur?.closing ? 'Close this position' : ordCur?.place ? 'Place this order again' : 'Change limit price';
 }
 // the same order (legs, quantity, sides, time in force) at a new limit
 function orderBody(o, nl) {
@@ -1097,6 +1131,7 @@ function orderBody(o, nl) {
 // Options buying power an order at limit `p` ties up: the premium for a debit, and at least its max loss
 // (the max loss moves dollar for dollar with the price). null when it can't be told (undefined risk).
 function bpNeed(c, p) {
+  if (c.closing) return 0;          // closing a position frees buying power
   const q = c.qty * 100;
   const signed = (v) => (c.mleg ? v : (c.order.side === 'sell' ? -v : v));      // debit positive
   const debit = Math.max(0, signed(p)) * q;
@@ -1214,7 +1249,9 @@ $('ordGo').addEventListener('click', async () => {
     const tot = Math.abs(nl) * c.qty * 100;
     const sideTot = c.mleg ? (nl < 0 ? `receive ${money2(tot)}` : nl > 0 ? `pay ${money2(tot)}` : 'no premium') : `${money2(tot)}`;
     const what = `${dc(c.lim, c.mleg)} → ${dc(nl, c.mleg)} (${c.qty} × 100: ${sideTot} if it fills, before fees)`;
-    $('ordConfirm').textContent = c.place
+    $('ordConfirm').textContent = c.closing
+      ? `Place a new GTC closing order for these legs at ${dc(nl, c.mleg)} (${c.qty} × 100: ${sideTot} if it fills, before fees).` + bpNote
+      : c.place
       ? `Place a new order: the same legs, quantity and ${(c.order.time_in_force || '').toUpperCase()} as the cancelled one, at ${dc(nl, c.mleg)} ` +
         `(${c.qty} × 100: ${sideTot} if it fills, before fees).` + (c.order.time_in_force === 'gtc' ? ' A new GTC order gets a fresh 90 days.' : '') + bpNote
       : c.recreate
@@ -1230,7 +1267,7 @@ $('ordGo').addEventListener('click', async () => {
   if (c.place) {
     try {
       const res = await api.placeOrder(orderBody(c.order, nl));
-      await afterOrderChange(`· ${c.und} order placed again at ${dc(nl, c.mleg)} (Alpaca status: ${res?.status || 'sent'})`);
+      await afterOrderChange(`· ${c.und} ${c.closing ? 'closing order placed' : 'order placed again'} at ${dc(nl, c.mleg)} (Alpaca status: ${res?.status || 'sent'})`);
     } catch (e) {
       showOrdErr(`Alpaca rejected the order (${e.message}). Nothing was placed.`);
       $('ordGo').disabled = false; $('ordGo').textContent = 'Confirm: place order';
