@@ -102,6 +102,10 @@ The first visit downloads ~20 MB of Python/pandas, which the browser then caches
 * **Isolation**: a Content-Security-Policy limits network access to Alpaca's hosts and the pinned CDN
   (scripts carry SRI hashes). The report renders in a sandboxed iframe with no access to the page's
   storage. Both the full and the shareable (`--share`) report can be downloaded.
+* **Updates**: every build gets new file names (`app.js?v=<build>`, a wheel with the build in its name), so a
+  browser reload never runs a stale cached copy. The open page also checks for a newer deployment on
+  **Refresh** and when you return to the tab, and reloads into it (back to the same report tab when kept
+  unlocked; otherwise it offers a reload button).
 * **Deploy**: `.github/workflows/pages.yml` runs the tests, builds the site with
   `python scripts/build_site.py site`, and publishes it. One-time setup: repo **Settings → Pages →
   Source: GitHub Actions**.

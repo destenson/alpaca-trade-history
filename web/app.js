@@ -568,6 +568,48 @@ let reports = null;
 let lastCreds = null;     // kept in memory for this tab only, so Refresh needs no re-entry
 let currentView = 'full';
 let currentTab = null;    // report tab the viewer is on (reported by the frame)
+try {                     // restored after an automatic reload for a new version
+  const keep = JSON.parse(sessionStorage.getItem('aa-resume') || 'null');
+  sessionStorage.removeItem('aa-resume');
+  if (keep) { currentTab = /^[a-z]{1,30}$/.test(keep.tab || '') ? keep.tab : null; currentView = keep.view === 'share' ? 'share' : 'full'; }
+} catch (e) { /* storage unavailable */ }
+
+// ------------------------------------------------------------------ new deployments
+// Every deployment has a new build id (in app.js?v=<build> and manifest.json). When a newer one is live,
+// reload into it: straight back to the report if this device is kept unlocked, otherwise offer a button
+// (reloading would drop keys held only in this tab's memory).
+const MY_BUILD = new URL(import.meta.url).searchParams.get('v');
+async function newerBuild() {
+  if (!MY_BUILD) return false;          // local preview without build stamps
+  try {
+    const m = await (await fetch('manifest.json', { cache: 'no-store' })).json();
+    return Boolean(m.build) && m.build !== MY_BUILD;
+  } catch (e) { return false; }
+}
+function reloadForUpdate() {
+  try { sessionStorage.setItem('aa-resume', JSON.stringify({ tab: currentTab, view: currentView })); } catch (e) { /* ignore */ }
+  location.reload();
+}
+async function checkForUpdate() {
+  if (refreshing || !(await newerBuild())) return false;
+  const st = $('refreshStatus');
+  st.classList.remove('err');
+  if (!$('lock').hidden) {              // kept unlocked: the reload reopens the report by itself
+    st.textContent = '· A new version is live: reloading…';
+    setTimeout(reloadForUpdate, 600);
+  } else {
+    st.textContent = '· A new version is live. ';
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'linkbtn'; b.textContent = 'Reload to update';
+    b.title = 'Reload the page; keys that were only held in this tab will need to be entered again';
+    b.onclick = reloadForUpdate;
+    st.append(b);
+  }
+  return true;
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && !$('result').hidden) checkForUpdate();
+});
 let refreshing = false;
 
 let lastMeta = null;
@@ -631,6 +673,7 @@ async function run(creds) {
 // Re-fetch and re-analyze with the in-memory keys; the current report stays up until the new one is ready.
 async function refresh(force = false) {
   if (!lastCreds || refreshing) return;
+  if (await checkForUpdate()) return;   // the new version re-runs the report itself
   refreshing = true;
   const btn = $('refresh');
   btn.disabled = true;
