@@ -223,6 +223,7 @@ document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('
   const fmt = (v) => '$' + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const px = (v) => fmt(v) + (v > 0 ? ' debit' : v < 0 ? ' credit' : ' even');
   const signed = (v) => (v < 0 ? '−' : v > 0 ? '+' : '') + fmt(v);
+  const cellSigned = (v) => '$ ' + (v < 0 ? '−' : v > 0 ? '+' : '') + fmt(v).slice(1);   // table cells: $ +252.41
   function fillText(est, net) {
     const e = est - net;
     return e <= 0.005 ? 'at or through your limit: likely to fill near the open'
@@ -284,7 +285,7 @@ document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('
       for (const k of v.rows) {
         setCell(k, cEst, px(estTotal / v.um), estTotal / v.um, false);
         const edge = estTotal - v.net;
-        setCell(k, cEdge, signed(edge), edge, true);
+        setCell(k, cEdge, cellSigned(edge), edge, true);
         setCell(k, cSpot, fmt(S), S, false);
       }
       const plot = document.getElementById(v.fid);

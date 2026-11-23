@@ -8,6 +8,7 @@ from __future__ import annotations
 import html
 import json
 import math
+import re
 from datetime import date, datetime
 from pathlib import Path
 
@@ -116,6 +117,7 @@ class Report:
                 v = r[c]
                 f = fmt.get(c)
                 txt = f(v) if f else ("–" if v is None or (isinstance(v, float) and math.isnan(v)) else str(v))
+                txt = _cell_money(txt)
                 raw = v if isinstance(v, (int, float, np.integer, np.floating)) and not (isinstance(v, float) and math.isnan(v)) else txt
                 cls = ""
                 if c in pnl_cols and isinstance(v, (int, float, np.floating)) and not math.isnan(v):
@@ -1444,6 +1446,14 @@ def _nice_bins(s: pd.Series, target: int = 24):
     edges = np.arange(start, hi + step, step)
     # keep zero on an edge so wins and losses never share a bar
     return edges if len(edges) > 1 else np.array([lo - 1, hi + 1])
+
+
+_SIGNED_MONEY = re.compile(r"^([+−])\$(\d)")
+
+
+def _cell_money(txt: str) -> str:
+    """Table cells: '+$252.41' -> '$ +252.41' so the $ and the sign line up down a column."""
+    return _SIGNED_MONEY.sub(r"$ \1\2", txt) if isinstance(txt, str) else txt
 
 
 def _tip_attr(label: str) -> str:
