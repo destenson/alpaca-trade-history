@@ -1039,8 +1039,12 @@ function openOrderDialog(d) {
   const refs = [['now', mleg ? lim : (o.side === 'sell' ? -lim : lim)], ['mid', num(ref.mid)], ['natural', num(ref.natural)], ['est.', num(ref.est)]]
     .filter(([, v]) => v !== null).map(([k, v]) => `${k} ${dc(v, true)}`);
   $('ordRefs').textContent = refs.join(' · ');
-  $('ordPx').value = Math.abs(lim).toFixed(2);
-  $('ordSide').value = lim < 0 ? 'credit' : 'debit';
+  // a clicked natural / estimate price prefills the input (debit positive, like the report shows it)
+  let pre = num(ref.prefill);
+  if (pre !== null && !mleg) pre = Math.abs(pre);
+  const start = pre !== null && Math.abs(pre) <= 100000 ? Math.round(pre * 100) / 100 : lim;
+  $('ordPx').value = Math.abs(start).toFixed(2);
+  $('ordSide').value = start < 0 ? 'credit' : 'debit';
   $('ordSideL').hidden = !mleg;
   $('ordPx').previousSibling.textContent = mleg ? 'New limit (per spread)' : `New limit (per contract, ${o.side === 'sell' ? 'sell' : 'buy'})`;
   setOrdMode();

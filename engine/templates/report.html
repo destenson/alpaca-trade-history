@@ -291,7 +291,12 @@ document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('
     const row = [...table.tBodies[0].rows].find((r) => r.cells[0].dataset.v === String(k));
     if (!row) return;
     const td = row.cells[ci];
-    td.innerHTML = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\$/g, () => '<span class="cur">$</span>');
+    // a clickable price keeps its button; the popup then prefills the re-priced value
+    const btn = td.querySelector('button.ord-edit');
+    (btn || td).innerHTML = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\$/g, () => '<span class="cur">$</span>');
+    if (btn && Number.isFinite(v)) {
+      try { const r = JSON.parse(btn.dataset.ref || '{}'); r.prefill = Math.round(v * 100) / 100; r.est = v; btn.dataset.ref = JSON.stringify(r); } catch (_) {}
+    }
     td.dataset.v = String(v);
     if (pn) { td.classList.toggle('pos', v > 0); td.classList.toggle('neg', v < 0); }
   }

@@ -56,11 +56,19 @@ fn exp_profit(o: &PendingOrder) -> f64 {
 /// The limit price, clickable in the app to change it: carries the order id and the reference prices
 /// (per spread, debit positive) the change-price popup shows next to the input.
 fn limit_cell(o: &PendingOrder) -> Cell {
-    let text = px(o.net, o.net_is_estimate);
-    if o.id.is_empty() || o.net_is_estimate {
+    order_cell(o, px(o.net, o.net_is_estimate), None)
+}
+
+/// A reference price (natural, estimate): clicking it opens the change-price popup prefilled with it.
+fn price_cell(o: &PendingOrder, v: Option<f64>) -> Cell {
+    order_cell(o, px(v, false), v)
+}
+
+fn order_cell(o: &PendingOrder, text: String, prefill: Option<f64>) -> Cell {
+    if o.id.is_empty() || o.net_is_estimate || o.net.is_none() || text == "–" {
         return Cell::s(text);
     }
-    let refs = json!({"label": format!("{} {} · {}", o.underlying, o.strategy, o.legs_label()), "mid": o.mid_now.map(jf), "natural": o.natural.map(jf), "est": o.est_open.map(jf)});
+    let refs = json!({"prefill": prefill.map(|v| jr(v, 2)), "label": format!("{} {} · {}", o.underlying, o.strategy, o.legs_label()), "mid": o.mid_now.map(jf), "natural": o.natural.map(jf), "est": o.est_open.map(jf)});
     Cell::Order(text, o.id.clone(), refs.to_string())
 }
 
@@ -279,9 +287,9 @@ impl<'a> Report<'a> {
             let mut r = head(dte);
             r.extend([
                 Cell::s(px(o.mid_now, false)),
-                Cell::s(px(o.natural, false)),
+                price_cell(o, o.natural),
                 Cell::F(em),
-                Cell::s(px(o.est_open, false)),
+                price_cell(o, o.est_open),
                 Cell::F(edge_est(o)),
                 Cell::s(o.tif.to_uppercase()),
                 placed,
@@ -289,7 +297,7 @@ impl<'a> Report<'a> {
             entry.push(r);
             let mut r = head(exp_cell(o));
             r.extend([
-                Cell::s(px(o.natural, false)),
+                price_cell(o, o.natural),
                 Cell::F(o.max_gain),
                 Cell::F(o.max_loss),
                 Cell::F(rr(o)),
@@ -376,7 +384,7 @@ impl<'a> Report<'a> {
                 dte_cell(o),
                 Cell::s(o.tif.to_uppercase()),
                 limit_cell(o),
-                Cell::s(px(o.est_open, false)),
+                price_cell(o, o.est_open),
             ];
             for h in f.h.iter() {
                 row.push(Cell::F(h.unwrap_or(f64::NAN)));
