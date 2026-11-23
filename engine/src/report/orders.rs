@@ -71,7 +71,7 @@ fn order_cell(o: &PendingOrder, text: String, prefill: Option<f64>) -> Cell {
     // max loss at the current limit (whole order, negative = a loss; null when undefined), for the
     // popup's buying-power check at a new price
     let ml = if o.max_loss.is_finite() { jr(o.max_loss, 2) } else { Value::Null };
-    let refs = json!({"prefill": prefill.map(|v| jr(v, 2)), "maxloss": ml, "label": format!("{} {} · {}", o.underlying, o.strategy, o.legs_label()), "mid": o.mid_now.map(jf), "natural": o.natural.map(jf), "est": o.est_open.map(jf)});
+    let refs = json!({"prefill": prefill.map(|v| jr(v, 2)), "maxloss": ml, "label": format!("{} {} · {}", o.underlying, if o.strategy.is_empty() { if o.effect == "close" { "closing order" } else { "order" } } else { o.strategy.as_str() }, o.legs_label()), "mid": o.mid_now.map(jf), "natural": o.natural.map(jf), "est": o.est_open.map(jf)});
     Cell::Order(text, o.id.clone(), refs.to_string())
 }
 
