@@ -189,11 +189,12 @@ impl<'a> Report<'a> {
 
         parts.push(self.open_options());
 
-        let mut tb = Tbl::new(&["Opened", "Underlying", "Strategy", "Legs", "DTE", "Net premium", "Max risk", "Outcome", "Days", "P&L", "Return on risk"])
+        let mut tb = Tbl::new(&["Opened", "Underlying", "Strategy", "Legs", "DTE", "Net premium", "Max risk", "Outcome", "Days", "P&L", "P&L if filled", "Return on risk"])
             .f("Net premium", super::fm(true, 2))
             .f("Max risk", super::fm(false, 2))
             .f("Days", super::fnum(1))
             .f("P&L", super::fm(true, 2))
+            .f("P&L if filled", super::fm(true, 2))
             .f("Return on risk", super::fp(true, 0));
         let mut rows: Vec<&ComboRow> = c.iter().collect();
         rows.sort_by(|x, y| y.open_time.cmp(&x.open_time));
@@ -210,18 +211,28 @@ impl<'a> Report<'a> {
                 Cell::s(r.outcome),
                 Cell::F(r.hold_days),
                 match closers.get(&r.combo_id) {
-                    Some((id, refs)) => Cell::OrderF(r.pnl, id.clone(), refs.clone()),
+                    Some((id, refs, _)) => Cell::OrderF(r.pnl, id.clone(), refs.clone()),
                     None => Cell::F(r.pnl),
+                },
+                // realized so far + closing the rest at the open closing order's limit
+                match closers.get(&r.combo_id) {
+                    Some((id, refs, Some(f))) => {
+                        let mut v: Value = serde_json::from_str(refs).unwrap_or(json!({}));
+                        v["target"] = Value::Null;
+                        v["profit"] = json!(true);
+                        Cell::OrderF(r.realized_pnl + f, id.clone(), v.to_string())
+                    }
+                    _ => Cell::N,
                 },
                 Cell::F(r.ror),
             ]);
         }
-        let mut sub = "Net premium: blue = credit received, red = debit paid, fees included. Open positions include unrealized P&L; click an open position's P&L to close it (or change its closing order) at a chosen profit.";
+        let mut sub = "Net premium: blue = credit received, red = debit paid, fees included. Open positions include unrealized P&L; click an open position's P&L to close it (or change its closing order) at a chosen profit. P&L if filled: realized so far + closing the rest at the open closing order's limit.";
         if self.share {
-            tb.drop_cols(&["Net premium", "Max risk", "P&L"]);
+            tb.drop_cols(&["Net premium", "Max risk", "P&L", "P&L if filled"]);
             sub = "Return on risk = P&L ÷ max risk at entry. Per-position dollar amounts are omitted in the shared view.";
         }
-        parts.push(format!("<figure class=\"card wide\"><h3>All option strategies</h3><p class=\"sub\">{}</p>{}</figure>", sub, table(&tb, "t_strats", &["P&L", "Return on risk"])));
+        parts.push(format!("<figure class=\"card wide\"><h3>All option strategies</h3><p class=\"sub\">{}</p>{}</figure>", sub, table(&tb, "t_strats", &["P&L", "P&L if filled", "Return on risk"])));
         self.section("options", "Options", parts.concat());
     }
 
@@ -571,7 +582,7 @@ impl<'a> Report<'a> {
     /// profit. If an open order already closes exactly its legs, that order (to change); otherwise a new
     /// closing order ("new:<combo>") with the legs reversed. Profit is measured against the open lots'
     /// cost, like the unrealized P&L.
-    fn close_targets(&self) -> HashMap<usize, (String, String)> {
+    fn close_targets(&self) -> HashMap<usize, (String, String, Option<f64>)> {
         let a = self.a;
         let mark: HashMap<&str, f64> = a.open_positions.iter().map(|p| (p.symbol.as_str(), p.price)).collect();
         let mut legs: BTreeMap<usize, BTreeMap<String, (f64, f64, f64)>> = BTreeMap::new();   // qty, cost, value
@@ -608,6 +619,8 @@ impl<'a> Report<'a> {
             if !value.is_nan() {
                 refs["target"] = jr(value - basis, 2);
             }
+            // closing at the existing order's limit: cash in − the open lots' cost
+            let if_filled = exact.and_then(|o| o.net.map(|n| -n * o.units * 100.0 - basis));
             let id = match exact {
                 Some(o) => {
                     refs["scale"] = jf(o.units * 100.0);
@@ -633,7 +646,7 @@ impl<'a> Report<'a> {
                 }
             };
             if !id.is_empty() {
-                out.insert(cid, (id, refs.to_string()));
+                out.insert(cid, (id, refs.to_string(), if_filled));
             }
         }
         out

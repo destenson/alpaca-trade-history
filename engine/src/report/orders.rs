@@ -75,6 +75,38 @@ fn order_cell(o: &PendingOrder, text: String, prefill: Option<f64>) -> Cell {
     Cell::Order(text, o.id.clone(), refs.to_string())
 }
 
+/// A position's unrealized P&L, clickable to close it at a chosen profit: the open single-leg limit order
+/// that closes exactly this position (to change it), or a new closing order ("new:p") for it.
+fn position_close_cell(p: &crate::analysis::OpenPos, orders: &[PendingOrder]) -> Cell {
+    let upl = p.unrealized_pl;
+    if upl.is_nan() || p.qty == 0.0 || p.qty.fract() != 0.0 {
+        return Cell::F(upl);
+    }
+    let mult = if p.is_option { 100.0 } else { 1.0 };
+    let what = if p.is_option { leg(&p.symbol) } else { format!("{} sh", p.symbol) };
+    let mut refs = json!({"basis": jr(p.cost_basis, 2), "target": jr(upl, 2),
+        "label": format!("{} close · {}{} {}", p.underlying, if p.qty > 0.0 { "+" } else { "" }, util::g(p.qty), what)});
+    let exact = orders.iter().find(|o| o.order_type == "limit" && o.legs.len() == 1 && o.legs[0].symbol == p.symbol && (o.legs[0].ratio * o.units + p.qty).abs() < 1e-9);
+    let id = match exact {
+        Some(o) => {
+            refs["scale"] = jf(o.units * mult);
+            o.id.clone()
+        }
+        None => {
+            refs["scale"] = jf(p.qty.abs() * mult);
+            let sell = p.qty > 0.0;
+            refs["new"] = json!({"qty": p.qty.abs(), "legs": [{"symbol": p.symbol, "side": if sell { "sell" } else { "buy" },
+                "position_intent": if sell { "sell_to_close" } else { "buy_to_close" }, "ratio_qty": 1}]});
+            if orders.iter().any(|o| o.legs.iter().any(|l| l.symbol == p.symbol && (l.ratio > 0.0) != (p.qty > 0.0))) {
+                refs["overlap"] = json!(orders.iter().filter(|o| o.legs.iter().any(|l| l.symbol == p.symbol && (l.ratio > 0.0) != (p.qty > 0.0)))
+                    .map(|o| format!("{} at {}", o.legs_label(), px(o.net, false))).collect::<Vec<_>>().join("; "));
+            }
+            "new:0".to_string()
+        }
+    };
+    Cell::OrderF(upl, id, refs.to_string())
+}
+
 /// For an order that only closes positions: the cost basis of what it closes and the dollars per point of
 /// price (units × multiplier), so the popup can work from a target profit; `profit` opens it on that input.
 fn with_basis(c: Cell, basis: f64, scale: f64, profit: bool) -> Cell {
@@ -697,6 +729,7 @@ impl<'a> Report<'a> {
             .f("Cost basis", super::fm(false, 2))
             .f("Unrealized", super::fm(true, 2))
             .f("%", super::fp(true, 1));
+        let orders = O::parse_orders(&a.bundle.orders);
         for x in op {
             tb.push(vec![
                 Cell::s(&x.symbol),
@@ -707,7 +740,7 @@ impl<'a> Report<'a> {
                 Cell::F(x.price),
                 Cell::F(x.market_value),
                 Cell::F(x.cost_basis),
-                Cell::F(x.unrealized_pl),
+                position_close_cell(x, &orders),
                 Cell::F(x.unrealized_pct),
             ]);
         }

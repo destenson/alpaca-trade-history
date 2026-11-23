@@ -1009,7 +1009,7 @@ if ('requestIdleCallback' in window) requestIdleCallback(() => loadEngine().catc
 const NOT_REPLACEABLE = { accepted: 'accepted (queued, not yet at the exchange)', pending_new: 'pending new',
   pending_cancel: 'being cancelled', pending_replace: 'already being changed' };
 let ordCur = null;
-const money2 = (v) => '$' + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const money2 = (v) => '$' + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: Math.abs(v) < 1 ? 4 : 2 });
 const dc = (v, mleg) => (mleg ? `${money2(v)} ${v < 0 ? 'credit' : v > 0 ? 'debit' : 'even'}` : money2(v));
 function legText(o) {
   const legs = o.legs?.length ? o.legs : [o];
@@ -1028,7 +1028,8 @@ function closingOrderFrom(n) {
   if (!Number.isInteger(qty) || qty < 1 || qty > 10000) return null;
   const legs = [];
   for (const l of n.legs) {
-    if (!l || typeof l.symbol !== 'string' || !OCC.test(l.symbol) || !Number.isInteger(l.ratio_qty) || l.ratio_qty < 1) return null;
+    if (!l || typeof l.symbol !== 'string' || !Number.isInteger(l.ratio_qty) || l.ratio_qty < 1) return null;
+    if (!OCC.test(l.symbol) && (n.legs.length > 1 || !/^[A-Z][A-Z0-9.]{0,9}$/.test(l.symbol))) return null;   // stock: alone
     const p = lastPositions.find((x) => x.symbol === l.symbol);
     const pq = p ? +p.qty : 0;
     const side = pq > 0 ? 'sell' : 'buy';
@@ -1067,11 +1068,12 @@ function openOrderDialog(d, place = false) {
   // and place the same order at the new price instead, after its own confirmation
   const ref = d.ref && typeof d.ref === 'object' ? d.ref : {};
   const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-  ordCur = { id: o.id, mleg, qty, lim, und, order: o, recreate: !place && o.status === 'accepted', place, maxloss: num(ref.maxloss) };
+  const isOpt = (o.legs?.length ? o.legs : [o]).every((l) => OCC.test(l.symbol || ''));
+  ordCur = { id: o.id, mleg, qty, lim, und, order: o, recreate: !place && o.status === 'accepted', place, maxloss: num(ref.maxloss), mult: isOpt ? 100 : 1 };
   const label = typeof ref.label === 'string' ? ref.label.slice(0, 160) : `${und} · ${legText(o)}`;
   if (o.synthetic) ordCur.closing = true;
   ordCur.overlap = o.synthetic && typeof ref.overlap === 'string' ? ref.overlap.slice(0, 300) : '';
-  $('ordWhat').textContent = `${label} · ${qty} ${mleg ? (qty === 1 ? 'spread' : 'spreads') : (qty === 1 ? 'contract' : 'contracts')} · ${(o.time_in_force || '').toUpperCase()} · ${o.status}` +
+  $('ordWhat').textContent = `${label} · ${qty} ${mleg ? (qty === 1 ? 'spread' : 'spreads') : !isOpt ? (qty === 1 ? 'share' : 'shares') : (qty === 1 ? 'contract' : 'contracts')} · ${(o.time_in_force || '').toUpperCase()} · ${o.status}` +
     (lastCreds?.env === 'paper' ? ' · paper account' : ' · LIVE account');
   const refs = [[o.synthetic ? null : place ? 'was' : 'now', mleg ? lim : (o.side === 'sell' ? -lim : lim)], ['mid', num(ref.mid)], ['natural', num(ref.natural)], ['est.', num(ref.est)]]
     .filter(([k, v]) => k !== null && v !== null).map(([k, v]) => `${k} ${dc(v, true)}`);
@@ -1080,7 +1082,7 @@ function openOrderDialog(d, place = false) {
   let pre = num(ref.prefill);
   if (pre !== null && !mleg) pre = Math.abs(pre);
   const start = pre !== null && Math.abs(pre) <= 100000 ? Math.round(pre * 100) / 100 : lim;
-  $('ordPx').value = Math.abs(start).toFixed(2);
+  $('ordPx').value = fmtPx(ordCur, start);
   $('ordSide').value = start < 0 ? 'credit' : 'debit';
   $('ordSideL').hidden = !mleg;
   $('ordPx').previousSibling.textContent = mleg ? 'New limit (per spread)' : `New limit (per contract, ${o.side === 'sell' ? 'sell' : 'buy'})`;
@@ -1121,7 +1123,7 @@ function setOrdMode() {
 }
 // the same order (legs, quantity, sides, time in force) at a new limit
 function orderBody(o, nl) {
-  const base = { type: 'limit', qty: o.qty, time_in_force: o.time_in_force, limit_price: nl.toFixed(2) };
+  const base = { type: 'limit', qty: o.qty, time_in_force: o.time_in_force, limit_price: (nl < 0 ? '-' : '') + fmtPx(ordCur, nl) };
   if (o.order_class === 'mleg') {
     return { ...base, order_class: 'mleg',
       legs: o.legs.map((l) => ({ symbol: l.symbol, ratio_qty: l.ratio_qty, side: l.side, position_intent: l.position_intent })) };
@@ -1131,8 +1133,8 @@ function orderBody(o, nl) {
 // Options buying power an order at limit `p` ties up: the premium for a debit, and at least its max loss
 // (the max loss moves dollar for dollar with the price). null when it can't be told (undefined risk).
 function bpNeed(c, p) {
-  if (c.closing) return 0;          // closing a position frees buying power
-  const q = c.qty * 100;
+  if (c.closing || c.basis !== null) return 0;     // an order that only closes positions frees buying power
+  const q = c.qty * c.mult;
   const signed = (v) => (c.mleg ? v : (c.order.side === 'sell' ? -v : v));      // debit positive
   const debit = Math.max(0, signed(p)) * q;
   const allBuy = (c.order.legs?.length ? c.order.legs : [c.order]).every((l) => l.side === 'buy');
@@ -1140,10 +1142,14 @@ function bpNeed(c, p) {
   const lossAt = c.maxloss - (signed(p) - signed(c.lim)) * q;                   // negative = a loss
   return Math.max(debit, -Math.min(0, lossAt));
 }
+// price decimals: stocks under $1 trade in hundredths of a cent, everything else in cents
+const pxDec = (c, v) => (c && c.mult === 1 && Math.abs(v) < 1 ? 4 : 2);
+const roundPx = (c, v) => { const k = 10 ** pxDec(c, v); return Math.round(v * k) / k; };
+const fmtPx = (c, v) => Math.abs(v).toFixed(pxDec(c, v));
 function newLimit() {
   const v = Number($('ordPx').value);
   if (!Number.isFinite(v) || v < 0 || v > 100000) return null;
-  const r = Math.round(v * 100) / 100;
+  const r = roundPx(ordCur, v);
   return ordCur.mleg && $('ordSide').value === 'credit' ? -r : r;
 }
 for (const id of ['ordPx', 'ordSide']) $(id).addEventListener('input', () => { setOrdMode(); $('ordErr').hidden = true; syncProfit(); });
@@ -1162,12 +1168,12 @@ $('ordProfit').addEventListener('input', () => {      // profit typed: set the p
   setOrdMode(); $('ordErr').hidden = true;
   const want = Number($('ordProfit').value);
   if ($('ordProfit').value === '' || !Number.isFinite(want)) { $('ordProfitNote').textContent = ''; return; }
-  const net = Math.round((-(want + c.basis) / c.scale) * 100) / 100;      // signed, debit positive
+  const net = roundPx(c, -(want + c.basis) / c.scale);      // signed, debit positive
   if (!c.mleg && (c.order.side === 'sell' ? net > 0 : net < 0)) {
     $('ordProfitNote').textContent = `needs a ${c.order.side === 'sell' ? 'negative sale' : 'negative'} price: not possible`;
     return;
   }
-  $('ordPx').value = Math.abs(net).toFixed(2);
+  $('ordPx').value = fmtPx(c, net);
   $('ordSide').value = net < 0 ? 'credit' : 'debit';
   const got = -net * c.scale - c.basis;
   $('ordProfitNote').textContent = `→ ${dc(net, c.mleg)}` + (Math.abs(got - want) >= 0.005 ? ` (profit ${got < 0 ? '−' : ''}${money2(got)} after rounding to the cent)` : '');
@@ -1246,14 +1252,14 @@ $('ordGo').addEventListener('click', async () => {
       bpNote = ' (Could not check buying power: ' + (e.message || e) + ')';
     }
     $('ordGo').disabled = false;
-    const tot = Math.abs(nl) * c.qty * 100;
+    const tot = Math.abs(nl) * c.qty * c.mult;
     const sideTot = c.mleg ? (nl < 0 ? `receive ${money2(tot)}` : nl > 0 ? `pay ${money2(tot)}` : 'no premium') : `${money2(tot)}`;
-    const what = `${dc(c.lim, c.mleg)} → ${dc(nl, c.mleg)} (${c.qty} × 100: ${sideTot} if it fills, before fees)`;
+    const what = `${dc(c.lim, c.mleg)} → ${dc(nl, c.mleg)} (${c.mult === 1 ? c.qty + ' sh' : c.qty + ' × 100'}: ${sideTot} if it fills, before fees)`;
     $('ordConfirm').textContent = c.closing
-      ? `Place a new GTC closing order for these legs at ${dc(nl, c.mleg)} (${c.qty} × 100: ${sideTot} if it fills, before fees).` + bpNote
+      ? `Place a new GTC closing order for these legs at ${dc(nl, c.mleg)} (${c.mult === 1 ? c.qty + ' sh' : c.qty + ' × 100'}: ${sideTot} if it fills, before fees).` + bpNote
       : c.place
       ? `Place a new order: the same legs, quantity and ${(c.order.time_in_force || '').toUpperCase()} as the cancelled one, at ${dc(nl, c.mleg)} ` +
-        `(${c.qty} × 100: ${sideTot} if it fills, before fees).` + (c.order.time_in_force === 'gtc' ? ' A new GTC order gets a fresh 90 days.' : '') + bpNote
+        `(${c.mult === 1 ? c.qty + ' sh' : c.qty + ' × 100'}: ${sideTot} if it fills, before fees).` + (c.order.time_in_force === 'gtc' ? ' A new GTC order gets a fresh 90 days.' : '') + bpNote
       : c.recreate
       ? `Cancel this order, then place the same order (same legs, quantity and ${(c.order.time_in_force || '').toUpperCase()}) at the new limit: ${what}. ` +
         'Two separate steps: if Alpaca rejects the new order, the original order is placed again at its old price.' + bpNote
@@ -1276,7 +1282,7 @@ $('ordGo').addEventListener('click', async () => {
   }
   if (!c.recreate) {
     try {
-      const res = await api.replaceOrder(c.id, { limit_price: nl.toFixed(2) });
+      const res = await api.replaceOrder(c.id, { limit_price: (nl < 0 ? '-' : '') + fmtPx(c, nl) });
       await afterOrderChange(`· ${c.und} order changed to ${dc(nl, c.mleg)} (Alpaca status: ${res?.status || 'sent'})`);
     } catch (e) {
       if (e.status === 422 && /accepted/i.test(e.message)) {     // became (or still is) "accepted": offer cancel & re-place
