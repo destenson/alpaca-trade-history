@@ -1067,6 +1067,12 @@ function openOrderDialog(d, place = false) {
   $('ordProfitRow').hidden = ordCur.basis === null;
   $('ordKill').hidden = place;
   if (ordCur.basis !== null) syncProfit();
+  // clicked Unrealized: set the limit that closes at that profit
+  const target = num(ref.target);
+  if (ordCur.basis !== null && target !== null) {
+    $('ordProfit').value = target.toFixed(2);
+    $('ordProfit').dispatchEvent(new Event('input'));
+  }
   const focus = ordCur.basis !== null && ref.profit ? $('ordProfit') : $('ordPx');
   focus.focus(); focus.select();
 }

@@ -733,7 +733,7 @@ impl<'a> Report<'a> {
         let market = self.market().cloned();
         O::evaluate(&mut allo, &a.ledger, &a.open_positions, &a.bundle.option_snapshots, &|u| spot_from(a, u), today, market.as_ref());
         let pos_of = |sym: &str| a.open_positions.iter().find(|p| p.symbol == sym && p.qty != 0.0);
-        let mut tb = Tbl::new(&["#", "Underlying", "Legs", "Closes", "Order", "Limit", "Mid (quoted)", "Natural", "Cost basis", "Unrealized", "P&L if filled"])
+        let mut tb = Tbl::new(&["#", "Underlying", "Legs", "Order", "Limit", "Mid (quoted)", "Natural", "Cost basis", "Unrealized", "P&L if filled"])
             .f("Cost basis", super::fm(false, 2))
             .f("Unrealized", super::fm(true, 2))
             .f("P&L if filled", super::fm(true, 2));
@@ -779,14 +779,21 @@ impl<'a> Report<'a> {
             tb.push(vec![
                 Cell::I(k),
                 Cell::s(&o.underlying),
-                Cell::s(o.legs_label()),
-                Cell::s(closes.join(", ")),
+                Cell::Tip(o.legs_label(), format!("Closes {}", closes.join(", "))),
                 Cell::s(kind),
                 wb(limit_cell(o), false),
                 Cell::s(px(o.mid_now, false)),
                 wb(price_cell(o, o.natural), false),
                 Cell::F(basis),
-                Cell::F(value - basis),
+                // clicking it opens the popup set to close at that profit (today's market value)
+                match wb(limit_cell(o), true) {
+                    Cell::Order(_, id, refs) if !pnl.is_nan() && !(value - basis).is_nan() => {
+                        let mut v: Value = serde_json::from_str(&refs).unwrap_or(json!({}));
+                        v["target"] = jr(value - basis, 2);
+                        Cell::OrderF(value - basis, id, v.to_string())
+                    }
+                    _ => Cell::F(value - basis),
+                },
                 match wb(limit_cell(o), true) {
                     Cell::Order(_, id, refs) if !pnl.is_nan() => Cell::OrderF(pnl, id, refs),
                     _ => Cell::F(pnl),
@@ -797,7 +804,7 @@ impl<'a> Report<'a> {
             return None;
         }
         Some(format!(
-            "<figure class=\"card wide\"><h3>Open orders that close positions</h3><p class=\"sub\">Every open order with a leg that closes (part of) a position above. <b>Cost basis</b> is the fee-inclusive basis of what it closes; <b>Unrealized</b> is what that part is up or down now (market value − cost basis); <b>P&amp;L if filled</b> = cash at your limit − that basis, before closing fees (– for stop/market orders, or when a leg also opens a new position). Click a limit or natural price to change the order.</p>{}</figure>",
+            "<figure class=\"card wide\"><h3>Open orders that close positions</h3><p class=\"sub\">Every open order with a leg that closes (part of) a position above; hover the legs for what it closes. <b>Cost basis</b> is the fee-inclusive basis of what it closes; <b>Unrealized</b> is what that part is up or down now (market value − cost basis); <b>P&amp;L if filled</b> = cash at your limit − that basis, before closing fees (– for stop/market orders, or when a leg also opens a new position). Click a limit or natural price to change the order, a P&amp;L to set the limit from a profit, or Unrealized to close at today\u{2019}s profit.</p>{}</figure>",
             table(&tb, "t_closing", &["Unrealized", "P&L if filled"])
         ))
     }
