@@ -87,6 +87,10 @@ td.pos { color: var(--gain-text); } td.neg { color: var(--loss-text); }
   line-height: 1.4; color: var(--ink); background: var(--surface); border: 1px solid var(--axis);
   box-shadow: 0 6px 20px rgba(0,0,0,0.18); pointer-events: none; font-weight: 400; text-transform: none; letter-spacing: 0; }
 #tip[hidden] { display: none; }
+.scalebtn { float: right; margin: -2px 0 4px 8px; font: inherit; font-size: 11.5px; padding: 2px 9px; border-radius: 999px;
+  color: var(--ink-2); background: transparent; border: 1px solid var(--axis); cursor: pointer; position: relative; z-index: 2; }
+.scalebtn:hover { color: var(--ink); }
+.scalebtn[aria-pressed="true"] { color: var(--accent-ink, #fff); background: var(--series-1); border-color: var(--series-1); }
 .rp-table tr.stale td { background: color-mix(in srgb, var(--series-1) 10%, transparent); }
 .rp-table tr.stale td.rp-move { font-weight: 600; }
 .rp-table input { font: inherit; font-size: 13px; width: 6.5em; padding: 3px 6px; color: var(--ink); background: var(--page);
@@ -146,8 +150,9 @@ function layoutFor(spec) {
   return out;
 }
 function draw(id) {
-  const el = document.getElementById(id); const spec = FIGS[id];
+  const el = document.getElementById(id); let spec = FIGS[id];
   if (!el || !spec || typeof Plotly === 'undefined') return;
+  if (spec.symlog) spec = symlogSpec(spec);
   Plotly.react(el, resolve(spec.data), layoutFor(spec), { displaylogo: false, responsive: true,
     modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d'] });
   drawn.add(id);
@@ -337,6 +342,128 @@ document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('
   addEventListener('scroll', hide, true);
   addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
 })();
+// Signed log scale ("Log" button on charts): v -> sign(v)·log10(1 + |v|/c), i.e. log for large values,
+// −log(−v) for large negative ones, and linear within ±c of zero so the curve passes smoothly through 0.
+// The chart is drawn from a transformed copy; ticks and hover show the real values.
+function logEligible(spec) {
+  const d = spec.data, L = spec.layout;
+  if (!d.length || L.barmode === 'stack' || L.barmode === 'relative') return null;
+  if (d.some((t) => !['scatter', 'bar'].includes(t.type || 'scatter'))) return null;
+  const horiz = d.some((t) => t.orientation === 'h');
+  const k = horiz ? 'x' : 'y';
+  const vals = d.flatMap((t) => (t[k] || []).filter((v) => typeof v === 'number'));
+  if (vals.length < 2 || !vals.some((v) => v !== 0)) return null;
+  return k;
+}
+function niceUnit(vals) {
+  const a = vals.map(Math.abs).filter((v) => v > 0).sort((x, y) => x - y);
+  const q = a[Math.floor(a.length * 0.1)] || a[0];
+  return Math.pow(10, Math.floor(Math.log10(q)));
+}
+function symlogSpec(spec) {
+  const k = spec.symlogAxis;                       // 'x' (horizontal charts) or 'y'
+  const L = JSON.parse(JSON.stringify(spec.layout));
+  const data = spec.data.map((t) => ({ ...t }));
+  const axisOf = (t) => (t[k + 'axis'] || k);      // 'y', 'y2', 'x2' ...
+  const layoutKey = (ax) => ax.replace(/^([xy])(\d*)$/, (m, a, n) => a + 'axis' + n);
+  const groups = {};
+  for (const t of data) (groups[axisOf(t)] ||= []).push(t);
+  const fwd = {};
+  for (const [ax, traces] of Object.entries(groups)) {
+    const lk = layoutKey(ax), A = (L[lk] ||= {});
+    const vals = traces.flatMap((t) => (t[k] || []).filter((v) => typeof v === 'number'));
+    if (!vals.length) continue;
+    const c = niceUnit(vals);
+    const f = (v) => (typeof v === 'number' ? Math.sign(v) * Math.log10(1 + Math.abs(v) / c) : v);
+    fwd[ax] = f;
+    const pct = /%/.test(A.tickformat || ''), money = (A.tickprefix || '') === '$';
+    const fmt = (v, tick) => {
+      if (typeof v !== 'number') return '';
+      const s = v < 0 ? '−' : '';
+      let x = Math.abs(pct ? v * 100 : v);
+      const unit = x >= 1e6 ? [1e6, 'M'] : x >= 1e3 ? [1e3, 'k'] : [1, ''];
+      const body = tick ? (x / unit[0]).toLocaleString('en-US', { maximumFractionDigits: x < 1 ? 3 : 1 }) + unit[1]
+        : x.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      return s + (money ? '$' : '') + body + (pct ? '%' : '');
+    };
+    for (const t of traces) {
+      const orig = t[k];
+      t[k] = (orig || []).map(f);
+      t.hovertext = (orig || []).map((v) => fmt(v, false));
+      if (t.hovertemplate) {
+        t.hovertemplate = t.hovertemplate.replace(new RegExp('%\\{' + k + '(:[^}]*)?\\}', 'g'), '%{hovertext}');
+      } else if (t.hoverinfo !== 'skip') {
+        t.hovertemplate = (t.name ? t.name + ': ' : '') + '%{hovertext}<extra></extra>';
+      }
+      if (t.base !== undefined && typeof t.base === 'number') t.base = f(t.base);
+    }
+    // ticks at 0 and ±c·10^n across the data's range
+    const lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
+    const ticks = [0];
+    const span = Math.log10(Math.max(hi, -lo, c) / c);
+    const steps = span < 2.5 ? [1, 2, 5] : [1];           // fewer decades -> 1-2-5 ticks
+    for (let n = 0; n < 12; n++) {
+      for (const m of steps) {
+        const v = m * c * Math.pow(10, n);
+        if (v <= hi * 1.0001) ticks.push(v);
+        if (-v >= lo * 1.0001) ticks.push(-v);
+      }
+    }
+    // keep labels apart: walk outward from 0 on each side, dropping ticks too close to the last one kept
+    const gap = (f(hi) - f(lo)) / 9;
+    const kept = [0];
+    for (const side of [1, -1]) {
+      let last = 0;
+      for (const v of ticks.filter((t) => Math.sign(t) === side).sort((x, y) => Math.abs(x) - Math.abs(y))) {
+        if (Math.abs(f(v) - last) >= gap) { kept.push(v); last = f(v); }
+      }
+    }
+    A.tickmode = 'array'; A.tickvals = kept.map(f); A.ticktext = kept.map((v) => fmt(v, true));
+    delete A.tickformat; delete A.tickprefix; delete A.ticksuffix;
+    if (A.range) A.range = A.range.map(f);
+    A.title = { ...(A.title || {}), text: ((A.title && A.title.text) || '') + ((A.title && A.title.text) ? ' · ' : '') + 'log scale' };
+  }
+  // overlaid secondary axis with a fixed range: keep its zero level with the main axis
+  for (const [ax, f] of Object.entries(fwd)) {
+    const lk = layoutKey(ax), A = L[lk], main = L[k + 'axis'];
+    if (ax === k || !A || !A.overlaying || !A.range || !main || !main.range) continue;
+    const [a, b] = main.range;
+    const vs = groups[ax].flatMap((t) => (t[k] || []).filter((v) => typeof v === 'number'));
+    const kk = Math.max(...vs.map((v) => (v > 0 && b > 0 ? v / b : v < 0 && a < 0 ? v / a : 0)), 0) * 1.1 || 1;
+    A.range = [a * kk, b * kk];
+  }
+  if (L.shapes) {
+    L.shapes = L.shapes.map((sh) => {
+      const ref = sh[k + 'ref'] || k;
+      if (ref === 'paper' || !fwd[ref]) return sh;
+      return { ...sh, [k + '0']: fwd[ref](sh[k + '0']), [k + '1']: fwd[ref](sh[k + '1']) };
+    });
+  }
+  if (L.annotations) {
+    L.annotations = L.annotations.map((an) => {
+      const ref = an[k + 'ref'] || k;
+      return ref === 'paper' || !fwd[ref] || typeof an[k] !== 'number' ? an : { ...an, [k]: fwd[ref](an[k]) };
+    });
+  }
+  return { data, layout: L };
+}
+for (const [id, spec] of Object.entries(FIGS)) {
+  const k = logEligible(spec);
+  const el = document.getElementById(id);
+  if (!k || !el) continue;
+  spec.symlogAxis = k;
+  const btn = document.createElement('button');
+  btn.type = 'button'; btn.className = 'scalebtn'; btn.textContent = 'Log';
+  btn.setAttribute('aria-pressed', 'false');
+  btn.title = 'Switch between a linear and a logarithmic scale (negative values: −log, linear near zero)';
+  btn.addEventListener('click', () => {
+    spec.symlog = !spec.symlog;
+    btn.setAttribute('aria-pressed', String(spec.symlog));
+    draw(id);
+  });
+  const fig = el.closest('figure') || el.parentElement;
+  fig.insertBefore(btn, fig.firstChild);
+}
 // sortable tables
 document.querySelectorAll('table.sortable').forEach(t => {
   t.querySelectorAll('th').forEach((th, i) => th.addEventListener('click', () => {
