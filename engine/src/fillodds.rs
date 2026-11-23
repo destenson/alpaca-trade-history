@@ -11,9 +11,10 @@ use crate::util::{self, from_ny, ny_date};
 pub const SESSION: f64 = 6.5 / 24.0;
 pub const STEPS: usize = 13;
 pub const STEPS_LATER: usize = 3;
-pub const PATHS: usize = 2000;
+pub const PATHS: usize = 10_000;       // simulated paths (antithetic pairs)
 pub const HORIZONS: [usize; 5] = [1, 2, 3, 5, 8];
 pub const GTC_DAYS: i64 = 90;
+const GRID: usize = 256;         // log-price grid the spread is priced on at each check
 
 #[derive(Clone, Debug)]
 pub struct FillOdds {
@@ -175,15 +176,37 @@ pub fn fill_odds(po: &PendingOrder, market: &Market, iv_shift: f64) -> Option<Fi
             if !any_alive {
                 break;
             }
-            any_alive = false;
+            // Price the spread on a grid of log-prices spanning the live paths, then classify each path
+            // from the grid; only paths in a grid cell where the limit is crossed are priced exactly.
+            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
             for i in 0..np {
                 if alive[i] {
-                    if value(log_s[i].exp(), elapsed) <= net + tol {
-                        hit_at[i] = k;
-                        alive[i] = false;
-                    } else {
-                        any_alive = true;
-                    }
+                    lo = lo.min(log_s[i]);
+                    hi = hi.max(log_s[i]);
+                }
+            }
+            let dx = (hi - lo) / (GRID - 1) as f64;
+            let fills: Vec<bool> = if dx > 1e-12 {
+                (0..GRID).map(|g| value((lo + g as f64 * dx).exp(), elapsed) <= net + tol).collect()
+            } else {
+                vec![]
+            };
+            any_alive = false;
+            for i in 0..np {
+                if !alive[i] {
+                    continue;
+                }
+                let hit = if fills.is_empty() {
+                    value(log_s[i].exp(), elapsed) <= net + tol
+                } else {
+                    let g = (((log_s[i] - lo) / dx) as usize).min(GRID - 2);
+                    if fills[g] == fills[g + 1] { fills[g] } else { value(log_s[i].exp(), elapsed) <= net + tol }
+                };
+                if hit {
+                    hit_at[i] = k;
+                    alive[i] = false;
+                } else {
+                    any_alive = true;
                 }
             }
         }
