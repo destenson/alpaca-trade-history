@@ -20,6 +20,7 @@ from .occ import parse_occ
 from .interpret import build_units, readings
 from . import orders as O
 from . import reprice as RP
+from .reinvest import reinvest_table
 from .optionsmath import payoff_curves
 
 PLOTLY_CDN = "https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"
@@ -728,6 +729,8 @@ class Report:
         ou = c.groupby("underlying")["pnl"].sum().sort_values()
         parts.append(self._dist_fig("f_optund", [(k, k, c.loc[c["underlying"] == k, "pnl"]) for k in ou.index],
                                     "Options P&L by underlying", open_note, horizontal=True, unit="trades"))
+        if not self.share:   # share counts would reveal the account's dollar size
+            parts.append(self._reinvest_card())
 
         rr = done["ror"].dropna()
         if len(rr) > 2:
@@ -782,6 +785,62 @@ class Report:
                                          "Return on risk": lambda v: pct(v, True, 0)},
                                   tid="t_strats", pnl_cols=("P&L", "Return on risk")) + '</figure>')
         self.section("options", "Options", "".join(parts))
+
+    def _reinvest_card(self) -> str:
+        """Whole shares of each underlying that the option profits would have bought."""
+        a = self.a
+        op = a.open_positions
+        held = (op[op["asset"] == "stock"].groupby("symbol")["qty"].sum().to_dict()
+                if op is not None and not op.empty else {})
+        df = reinvest_table(a.combos, a.bundle.bars, lambda u: _spot_from(a, u, None), held)
+        if df.empty:
+            return ""
+        df = df[(df["profits"] > 0) | (df["held"] != 0)]
+        if df.empty:
+            return ""
+
+        def diff(v):
+            if pd.isna(v) or abs(v) < 1e-9:
+                return "on plan"
+            return f"buy {v:g}" if v > 0 else f"{-v:g} extra"
+
+        show = pd.DataFrame({
+            "Underlying": df["underlying"],
+            "Closed (W/L)": [f"{w} / {l}" for w, l in zip(df["wins"], df["losses"])],
+            "Profits from wins": df["profits"], "Shares": df["shares"], "Avg cost": df["avg_cost"],
+            "Cash left": df["cash"], "Price now": df["price_now"],
+            "Value now": df["value"].where(df["shares"] > 0),
+            "Gain on shares": df["gain"], "You hold": df["held"], "Vs. plan": df["short_by"],
+            "With losses: shares": df["net_shares"], "With losses: cash": df["net_cash"],
+        })
+        to_buy = df[df["short_by"] > 0]
+        buy_cost = float((to_buy["short_by"] * to_buy["price_now"]).sum(skipna=True))
+        tot_cost, tot_val = float(df["cost"].sum()), float(df["value"].sum(skipna=True))
+        unpriced = int(df["unpriced"].sum())
+        sub = (f"Profits from {int(df['wins'].sum())} winning positions ({money(df['profits'].sum(), dp=0)}) would have "
+               f"bought shares costing {money(tot_cost, dp=0)}, worth {money(tot_val, dp=0)} now "
+               f"({money(tot_val - tot_cost, True, 0)}). Matching the plan means buying "
+               f"{int(to_buy['short_by'].sum())} shares across {len(to_buy)} names for about "
+               f"{money(buy_cost, dp=0)} at current prices.")
+        note = ("How it's counted: each closed winning option position adds its profit to a pot for that underlying on "
+                "the day it closed; whenever the pot covers a share, whole shares are bought at that day's close and "
+                "the rest stays in the pot (<b>Cash left</b>). Losing positions are ignored. <b>With losses</b> shows "
+                "the stricter version: losses come out of the same pot, so they have to be earned back before more "
+                "shares are bought (shares already bought are kept; negative cash = losses still to recover). "
+                "<b>Vs. plan</b> compares with all the shares you hold now, however you bought them.")
+        if unpriced:
+            note += f" {unpriced} closing day(s) had no price history, so no shares were bought then."
+        return ('<figure class="card wide"><h3>Option profits reinvested in the underlying</h3>'
+                f'<p class="sub">{sub}</p>'
+                + self.table(show, {"Profits from wins": lambda v: money(v), "Shares": lambda v: f"{v:g}",
+                                    "Avg cost": lambda v: money(v), "Cash left": lambda v: money(v),
+                                    "Price now": lambda v: money(v), "Value now": lambda v: money(v),
+                                    "Gain on shares": lambda v: money(v, True), "You hold": lambda v: f"{v:g}",
+                                    "Vs. plan": diff, "With losses: shares": lambda v: f"{v:g}",
+                                    "With losses: cash": lambda v: money(v, True)},
+                             tid="t_reinvest", pnl_cols=("Gain on shares", "With losses: cash"))
+                + f'<p class="note">{note}</p></figure>')
+
 
     def _open_options(self) -> str:
         a = self.a
