@@ -252,6 +252,9 @@ class Alpaca {
   cancelOrder(id) { return this.send('DELETE', `/v2/orders/${encodeURIComponent(id)}`); }
   getOrder(id) { return this.send('GET', `/v2/orders/${encodeURIComponent(id)}?nested=true`); }
   placeOrder(body) { return this.send('POST', '/v2/orders', body); }
+  closedOrders(after) {
+    return this.get(`${this.base}/v2/orders`, { status: 'closed', nested: true, after, limit: 100, direction: 'desc' });
+  }
   positions() { return this.get(`${this.base}/v2/positions`); }
   clock() { return this.get(`${this.base}/v2/clock`); }
   openOrders() { return this.get(`${this.base}/v2/orders?status=open&nested=true&limit=500&direction=desc`); }
@@ -724,13 +727,15 @@ window.addEventListener('focus', () => {
 let refreshing = false;
 
 let lastMeta = null;
-let lastOrders = [];       // open orders as Alpaca returned them, for the change-price popup
+let lastOrders = [];
+let lastCancelled = [];    // option limit orders cancelled in the last day and not placed again (Re-place)       // open orders as Alpaca returned them, for the change-price popup
 async function analyze(creds, force = false) {
   const benchmarks = ($('bench').value || 'SPY QQQ').toUpperCase().split(/[\s,]+/).filter(Boolean);
   const engine = loadEngine();   // download the engine in parallel with the API calls
   const { bundle, meta } = await fetchBundle(creds, benchmarks, force);
   lastMeta = meta;
   lastOrders = bundle.orders || [];
+  lastCancelled = await recentCancels(new Alpaca(creds), lastOrders);
   step('Starting the analysis engine…');
   const mod = await engine;
   step(`Rebuilding ${bundle.activities.length} activities into lots, strategies and charts…`);
@@ -741,6 +746,7 @@ async function analyze(creds, force = false) {
 
 function applyResult(out) {
   reports = out;
+  renderCancelled();
   show(currentView);
   const s = out.summary;
   $('summary').innerHTML = s
@@ -1012,9 +1018,9 @@ function legText(o) {
     return `${l.side === 'sell' ? 'sell' : 'buy'} ${q !== 1 ? q + '× ' : ''}${what}`;
   }).join(', ');
 }
-function openOrderDialog(d) {
+function openOrderDialog(d, place = false) {
   if (typeof d.id !== 'string' || !/^[0-9a-f-]{8,64}$/i.test(d.id)) return;
-  const o = lastOrders.find((x) => x.id === d.id);
+  const o = (place ? lastCancelled : lastOrders).find((x) => x.id === d.id);
   const dlg = $('ordDlg');
   $('ordErr').hidden = true; $('ordConfirm').hidden = true;
   $('ordGo').textContent = 'Review change'; $('ordGo').disabled = false; $('ordMode').hidden = true;
@@ -1032,11 +1038,11 @@ function openOrderDialog(d) {
   // and place the same order at the new price instead, after its own confirmation
   const ref = d.ref && typeof d.ref === 'object' ? d.ref : {};
   const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-  ordCur = { id: o.id, mleg, qty, lim, und, order: o, recreate: o.status === 'accepted', maxloss: num(ref.maxloss) };
+  ordCur = { id: o.id, mleg, qty, lim, und, order: o, recreate: !place && o.status === 'accepted', place, maxloss: num(ref.maxloss) };
   const label = typeof ref.label === 'string' ? ref.label.slice(0, 160) : `${und} · ${legText(o)}`;
   $('ordWhat').textContent = `${label} · ${qty} ${mleg ? (qty === 1 ? 'spread' : 'spreads') : (qty === 1 ? 'contract' : 'contracts')} · ${(o.time_in_force || '').toUpperCase()} · ${o.status}` +
     (lastCreds?.env === 'paper' ? ' · paper account' : ' · LIVE account');
-  const refs = [['now', mleg ? lim : (o.side === 'sell' ? -lim : lim)], ['mid', num(ref.mid)], ['natural', num(ref.natural)], ['est.', num(ref.est)]]
+  const refs = [[place ? 'was' : 'now', mleg ? lim : (o.side === 'sell' ? -lim : lim)], ['mid', num(ref.mid)], ['natural', num(ref.natural)], ['est.', num(ref.est)]]
     .filter(([, v]) => v !== null).map(([k, v]) => `${k} ${dc(v, true)}`);
   $('ordRefs').textContent = refs.join(' · ');
   // a clicked natural / estimate price prefills the input (debit positive, like the report shows it)
@@ -1058,8 +1064,9 @@ function openOrderDialog(d) {
 function setOrdMode() {
   $('ordConfirm').hidden = true;
   $('ordGo').disabled = false;
-  $('ordGo').textContent = ordCur?.recreate ? 'Review cancel & re-place' : 'Review change';
+  $('ordGo').textContent = ordCur?.place ? 'Review new order' : ordCur?.recreate ? 'Review cancel & re-place' : 'Review change';
   $('ordMode').hidden = !ordCur?.recreate;
+  $('ordTitle').textContent = ordCur?.place ? 'Place this order again' : 'Change limit price';
 }
 // the same order (legs, quantity, sides, time in force) at a new limit
 function orderBody(o, nl) {
@@ -1076,7 +1083,8 @@ function bpNeed(c, p) {
   const q = c.qty * 100;
   const signed = (v) => (c.mleg ? v : (c.order.side === 'sell' ? -v : v));      // debit positive
   const debit = Math.max(0, signed(p)) * q;
-  if (c.maxloss === null) return signed(p) >= 0 && !c.mleg ? debit : null;
+  const allBuy = (c.order.legs?.length ? c.order.legs : [c.order]).every((l) => l.side === 'buy');
+  if (c.maxloss === null) return signed(p) >= 0 && (allBuy || !c.mleg) && c.order.side !== 'sell' ? debit : null;
   const lossAt = c.maxloss - (signed(p) - signed(c.lim)) * q;                   // negative = a loss
   return Math.max(debit, -Math.min(0, lossAt));
 }
@@ -1106,19 +1114,19 @@ $('ordGo').addEventListener('click', async () => {
   if (nl === null) { showOrdErr('Enter a price, e.g. 2.45.'); return; }
   const c = ordCur;
   if ($('ordConfirm').hidden) {           // first click: show exactly what will be sent
-    if (nl === c.lim) { showOrdErr('That is the current limit.'); return; }
+    if (nl === c.lim && !c.place) { showOrdErr('That is the current limit.'); return; }
     // buying power: the old order's share is released when it is replaced or cancelled
     $('ordGo').disabled = true;
     let bpNote = '';
     try {
       const acct = await new Alpaca(lastCreds).account();
       const bp = +acct.options_buying_power;
-      const need = bpNeed(c, nl), held = bpNeed(c, c.lim) || 0;
+      const need = bpNeed(c, nl), held = c.place ? 0 : (bpNeed(c, c.lim) || 0);
       if (Number.isFinite(bp) && need !== null) {
         const avail = bp + held;
         if (need > avail + 0.005) {
           showOrdErr(`Not enough options buying power: at ${dc(nl, c.mleg)} this order needs about ${money2(need)}, ` +
-            `and ${money2(avail)} is available (${money2(bp)} free + ${money2(held)} this order holds now). Nothing was sent.`);
+            `and ${money2(avail)} is available` + (held ? ` (${money2(bp)} free + ${money2(held)} this order holds now)` : '') + '. Nothing was sent.');
           $('ordGo').disabled = false;
           return;
         }
@@ -1133,16 +1141,29 @@ $('ordGo').addEventListener('click', async () => {
     const tot = Math.abs(nl) * c.qty * 100;
     const sideTot = c.mleg ? (nl < 0 ? `receive ${money2(tot)}` : nl > 0 ? `pay ${money2(tot)}` : 'no premium') : `${money2(tot)}`;
     const what = `${dc(c.lim, c.mleg)} → ${dc(nl, c.mleg)} (${c.qty} × 100: ${sideTot} if it fills, before fees)`;
-    $('ordConfirm').textContent = c.recreate
+    $('ordConfirm').textContent = c.place
+      ? `Place a new order: the same legs, quantity and ${(c.order.time_in_force || '').toUpperCase()} as the cancelled one, at ${dc(nl, c.mleg)} ` +
+        `(${c.qty} × 100: ${sideTot} if it fills, before fees).` + (c.order.time_in_force === 'gtc' ? ' A new GTC order gets a fresh 90 days.' : '') + bpNote
+      : c.recreate
       ? `Cancel this order, then place the same order (same legs, quantity and ${(c.order.time_in_force || '').toUpperCase()}) at the new limit: ${what}. ` +
         'Two separate steps: if Alpaca rejects the new order, the original order is placed again at its old price.' + bpNote
       : `Replace the order's limit ${what}. Alpaca cancels the old order and places the new one at once.` + bpNote;
     $('ordConfirm').hidden = false;
-    $('ordGo').textContent = c.recreate ? 'Confirm cancel & re-place' : 'Confirm change';
+    $('ordGo').textContent = c.place ? 'Confirm: place order' : c.recreate ? 'Confirm cancel & re-place' : 'Confirm change';
     return;
   }
   $('ordGo').disabled = true; $('ordGo').textContent = 'Sending…';
   const api = new Alpaca(lastCreds);
+  if (c.place) {
+    try {
+      const res = await api.placeOrder(orderBody(c.order, nl));
+      await afterOrderChange(`· ${c.und} order placed again at ${dc(nl, c.mleg)} (Alpaca status: ${res?.status || 'sent'})`);
+    } catch (e) {
+      showOrdErr(`Alpaca rejected the order (${e.message}). Nothing was placed.`);
+      $('ordGo').disabled = false; $('ordGo').textContent = 'Confirm: place order';
+    }
+    return;
+  }
   if (!c.recreate) {
     try {
       const res = await api.replaceOrder(c.id, { limit_price: nl.toFixed(2) });
@@ -1193,3 +1214,44 @@ $('ordGo').addEventListener('click', async () => {
     }
   }
 });
+
+// ------------------------------------------------------------------- recently cancelled orders: Re-place
+const legSig = (o) => (o.legs?.length ? o.legs : [o]).map((l) => `${l.symbol}:${l.side}:${l.ratio_qty || 1}`).sort().join(',') + '×' + o.qty;
+async function recentCancels(api, open) {
+  try {
+    const after = new Date(Date.now() - 24 * 3600e3).toISOString();
+    const closed = await api.closedOrders(after);
+    const openSigs = new Set(open.map(legSig));
+    const seen = new Set(), out = [];
+    for (const o of closed || []) {
+      const legs = o.legs?.length ? o.legs : [o];
+      if (o.status !== 'canceled' || o.type !== 'limit' || o.limit_price == null || +o.filled_qty > 0) continue;
+      if (!legs.every((l) => OCC.test(l.symbol || ''))) continue;      // option orders only
+      const sig = legSig(o);
+      if (openSigs.has(sig) || seen.has(sig)) continue;                 // already placed again (or newer copy)
+      seen.add(sig);
+      out.push(o);
+    }
+    return out;
+  } catch (_) { return []; }
+}
+function renderCancelled() {
+  const box = $('cancelled');
+  box.textContent = '';
+  box.hidden = !lastCancelled.length;
+  if (!lastCancelled.length) return;
+  box.append('Cancelled in the last day: ');
+  lastCancelled.forEach((o, i) => {
+    const und = (OCC.exec((o.legs?.[0] || o).symbol) || [])[1];
+    const mleg = o.order_class === 'mleg';
+    const lim = +o.limit_price;
+    const span = document.createElement('span');
+    span.className = 'cxl';
+    span.textContent = `${i ? ' · ' : ''}${und} ${o.qty}× ${legText(o)} at ${dc(mleg ? lim : (o.side === 'sell' ? -lim : lim), true)} ${(o.time_in_force || '').toUpperCase()} `;
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'linkbtn'; b.textContent = 'Re-place…';
+    b.onclick = () => openOrderDialog({ id: o.id, ref: {} }, true);
+    span.append(b);
+    box.append(span);
+  });
+}

@@ -104,3 +104,5 @@ main:has(#result:not([hidden])) { max-width: 1440px; }
 #ordDlg .ordconfirm { margin: 14px 0 0; padding: 10px 12px; border-radius: 8px; font-size: 13.5px;
   background: color-mix(in srgb, var(--accent) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
 #ordDlg .ordbtns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.cancelled { margin-top: 4px; }
+.cancelled .cxl { white-space: nowrap; }
