@@ -107,6 +107,12 @@ td .cur { color: var(--muted); margin-right: 0.18em; font-weight: 400; }
 #tip[hidden] { display: none; }
 /* tickers: link to Alpaca's trade page; the chart icon links to TradingView and previews a mini chart */
 a.tk { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--muted); }
+/* an order's limit price: in the web app it opens the change-price popup; plain text elsewhere */
+button.ord-edit { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; text-align: inherit; }
+.embedded button.ord-edit { cursor: pointer; border-bottom: 1px dotted var(--muted); }
+.embedded button.ord-edit:hover, .embedded button.ord-edit:focus-visible { color: var(--series-1); border-bottom-color: currentColor; }
+.embedded button.ord-edit::after { content: " ✎"; font-size: 0.85em; opacity: 0; }
+.embedded button.ord-edit:hover::after, .embedded button.ord-edit:focus-visible::after { opacity: 0.7; }
 a.tk:hover, a.tk:focus-visible { color: var(--series-1); border-bottom-color: currentColor; }
 a.tv { text-decoration: none; font-size: 0.85em; margin-left: 0.3em; opacity: 0.6; }
 a.tv:hover, a.tv:focus-visible { opacity: 1; }
@@ -206,6 +212,16 @@ document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', e =>
 // theme: the toggle asks the host to switch, and the host pushes its theme in. Only a theme name is
 // ever exchanged.
 const EMBEDDED = window.parent !== window;
+if (EMBEDDED) document.documentElement.classList.add('embedded');
+// an order's limit price opens the host page's change-price popup; only the order id and the reference
+// prices shown next to the input are passed (the host looks the order up itself)
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('button.ord-edit');
+  if (!b || !EMBEDDED) return;
+  let ref = {};
+  try { ref = JSON.parse(b.dataset.ref || '{}'); } catch (_) {}
+  parent.postMessage({ type: 'aa-edit-order', id: b.dataset.oid, ref }, '*');
+});
 function setTheme(t, notify) {
   const root = document.documentElement;
   if (t === 'light' || t === 'dark') root.dataset.theme = t; else delete root.dataset.theme;

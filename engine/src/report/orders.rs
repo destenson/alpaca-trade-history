@@ -53,6 +53,17 @@ fn exp_profit(o: &PendingOrder) -> f64 {
     }
 }
 
+/// The limit price, clickable in the app to change it: carries the order id and the reference prices
+/// (per spread, debit positive) the change-price popup shows next to the input.
+fn limit_cell(o: &PendingOrder) -> Cell {
+    let text = px(o.net, o.net_is_estimate);
+    if o.id.is_empty() || o.net_is_estimate {
+        return Cell::s(text);
+    }
+    let refs = json!({"label": format!("{} {} · {}", o.underlying, o.strategy, o.legs_label()), "mid": o.mid_now.map(jf), "natural": o.natural.map(jf), "est": o.est_open.map(jf)});
+    Cell::Order(text, o.id.clone(), refs.to_string())
+}
+
 fn name(o: &PendingOrder) -> String {
     match o.expiry {
         Some(e) => format!("{} {} {}", o.underlying, o.strategy, e.format("%m/%d")),
@@ -241,7 +252,7 @@ impl<'a> Report<'a> {
         let mut entry = Tbl::new(&["#", "Underlying", "Strategy", "Legs", "DTE", "Limit", "Mid (quoted)", "Natural", "Edge vs mid", est_col, "Edge vs est.", "TIF", "Placed"])
             .f("Edge vs mid", super::fm(true, 2))
             .f("Edge vs est.", super::fm(true, 2));
-        let mut payoff = Tbl::new(&["#", "Underlying", "Strategy", "Legs", "Expires", "Limit", "Max profit", "Max loss", "Reward/risk", "Breakevens", "Prob. profit", "Fill", "Exp. profit"])
+        let mut payoff = Tbl::new(&["#", "Underlying", "Strategy", "Legs", "Expires", "Limit", "Natural", "Max profit", "Max loss", "Reward/risk", "Breakevens", "Prob. profit", "Fill", "Exp. profit"])
             .f("Max profit", super::flim())
             .f("Max loss", super::flim_loss())
             .f("Reward/risk", super::fnum(2))
@@ -253,7 +264,7 @@ impl<'a> Report<'a> {
                 (Some(m), Some(n)) if !o.net_is_estimate => (m - n) * o.units * o.mult(),
                 _ => f64::NAN,
             };
-            let head = |exp: Cell| vec![Cell::I(k as i64 + 1), Cell::s(&o.underlying), strat(o), Cell::s(o.legs_label()), exp, Cell::s(px(o.net, o.net_is_estimate))];
+            let head = |exp: Cell| vec![Cell::I(k as i64 + 1), Cell::s(&o.underlying), strat(o), Cell::s(o.legs_label()), exp, limit_cell(o)];
             let dte = match o.expiry {
                 Some(e) => {
                     let d = (e - today).num_days();
@@ -278,6 +289,7 @@ impl<'a> Report<'a> {
             entry.push(r);
             let mut r = head(exp_cell(o));
             r.extend([
+                Cell::s(px(o.natural, false)),
                 Cell::F(o.max_gain),
                 Cell::F(o.max_loss),
                 Cell::F(rr(o)),
@@ -337,7 +349,7 @@ impl<'a> Report<'a> {
         for (k, o) in opening.iter().enumerate() {
             if o.unpriced() {
                 let mut row = vec![Cell::I(k as i64 + 1), Cell::s(&o.underlying), strat(o), Cell::s(o.legs_label()), dte_cell(o), Cell::s(o.tif.to_uppercase()),
-                                   Cell::s(px(o.net, o.net_is_estimate)), Cell::s("–")];
+                                   limit_cell(o), Cell::s("–")];
                 row.push(Cell::s("no quotes yet"));
                 row.extend((0..5).map(|_| Cell::N));
                 let good_until = if o.tif.eq_ignore_ascii_case("gtc") {
@@ -363,7 +375,7 @@ impl<'a> Report<'a> {
                 Cell::s(o.legs_label()),
                 dte_cell(o),
                 Cell::s(o.tif.to_uppercase()),
-                Cell::s(px(o.net, o.net_is_estimate)),
+                limit_cell(o),
                 Cell::s(px(o.est_open, false)),
             ];
             for h in f.h.iter() {

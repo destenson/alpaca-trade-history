@@ -111,6 +111,21 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
     <iframe id="frame" title="Report" sandbox="allow-scripts allow-downloads allow-popups allow-popups-to-escape-sandbox"></iframe>
   </section>
 </main>
+<dialog id="ordDlg" aria-labelledby="ordTitle">
+  <h3 id="ordTitle">Change limit price</h3>
+  <p id="ordWhat" class="ordwhat"></p>
+  <p id="ordRefs" class="muted"></p>
+  <div class="ordrow">
+    <label>New limit (per spread)<input id="ordPx" type="number" step="0.01" min="0" inputmode="decimal" autocomplete="off"></label>
+    <label id="ordSideL">&nbsp;<select id="ordSide"><option value="debit">debit</option><option value="credit">credit</option></select></label>
+  </div>
+  <p id="ordConfirm" class="ordconfirm" hidden></p>
+  <p id="ordErr" class="err" hidden></p>
+  <div class="ordbtns">
+    <button type="button" id="ordCancel" class="ghost">Cancel</button>
+    <button type="button" id="ordGo" class="primary">Review change</button>
+  </div>
+</dialog>
 <script type="module" src="app.js"></script>
 </body>
 </html>

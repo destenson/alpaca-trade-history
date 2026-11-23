@@ -70,6 +70,8 @@ pub enum Cell {
     T(String, f64),
     /// text with a hover note
     Tip(String, String),
+    /// an order's limit price: text, order id, reference prices (JSON) for the change-price popup
+    Order(String, String, String),
     N,
 }
 
@@ -382,6 +384,7 @@ pub fn table(t: &Tbl, tid: &str, pnl_cols: &[&str]) -> String {
                     Cell::S(s) => s.clone(),
                     Cell::T(s, _) => s.clone(),
                     Cell::Tip(s, _) => s.clone(),
+                    Cell::Order(s, _, _) => s.clone(),
                 },
             };
             let (txt, sign) = unsign(&txt);
@@ -417,6 +420,9 @@ pub fn table(t: &Tbl, tid: &str, pnl_cols: &[&str]) -> String {
             };
             let html = match v {
                 Cell::Tip(_, note) => format!("<span data-tip=\"{}\" tabindex=\"0\">{}</span>", esc(note), html),
+                Cell::Order(_, id, refs) if !id.is_empty() => format!(
+                    "<button type=\"button\" class=\"ord-edit\" data-oid=\"{}\" data-ref=\"{}\" title=\"Change this order's limit price\">{}</button>",
+                    esc(id), esc(refs), html),
                 _ => html,
             };
             let html = if ci == 0 { format!("{}{}", std::mem::take(&mut toggle), html) } else { html };

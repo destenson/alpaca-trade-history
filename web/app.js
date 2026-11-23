@@ -225,6 +225,25 @@ class Alpaca {
   }
 
   account() { return this.get(`${this.base}/v2/account`); }
+
+  // Change an open order (Alpaca replaces it with a new order id). Not retried: a repeat could act twice.
+  async replaceOrder(id, body) {
+    this.calls++;
+    let r;
+    try {
+      r = await fetch(`${this.base}/v2/orders/${encodeURIComponent(id)}`, { method: 'PATCH', referrerPolicy: 'no-referrer', cache: 'no-store',
+        headers: { ...this.headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    } catch (e) {
+      throw new Error('Network error: the change may not have reached Alpaca. Refresh to see the order as it stands.');
+    }
+    const text = await r.text();
+    if (!r.ok) {
+      let msg = text;
+      try { msg = JSON.parse(text).message || text; } catch (_) { /* not JSON */ }
+      throw new Error(`Alpaca refused the change (${r.status}): ${msg.slice(0, 300)}`);
+    }
+    return JSON.parse(text);
+  }
   positions() { return this.get(`${this.base}/v2/positions`); }
   clock() { return this.get(`${this.base}/v2/clock`); }
   openOrders() { return this.get(`${this.base}/v2/orders?status=open&nested=true&limit=500&direction=desc`); }
@@ -697,11 +716,13 @@ window.addEventListener('focus', () => {
 let refreshing = false;
 
 let lastMeta = null;
+let lastOrders = [];       // open orders as Alpaca returned them, for the change-price popup
 async function analyze(creds, force = false) {
   const benchmarks = ($('bench').value || 'SPY QQQ').toUpperCase().split(/[\s,]+/).filter(Boolean);
   const engine = loadEngine();   // download the engine in parallel with the API calls
   const { bundle, meta } = await fetchBundle(creds, benchmarks, force);
   lastMeta = meta;
+  lastOrders = bundle.orders || [];
   step('Starting the analysis engine…');
   const mod = await engine;
   step(`Rebuilding ${bundle.activities.length} activities into lots, strategies and charts…`);
@@ -842,6 +863,7 @@ window.addEventListener('message', (e) => {
   if (e.data.type === 'aa-tab' && typeof e.data.tab === 'string' && /^[a-z]{1,30}$/.test(e.data.tab)) currentTab = e.data.tab;
   if (e.data.type === 'aa-theme' && (e.data.theme === 'light' || e.data.theme === 'dark')) setTheme(e.data.theme);
   if (e.data.type === 'aa-tv') showChart(e.data);
+  if (e.data.type === 'aa-edit-order') openOrderDialog(e.data);
   if (e.data.type === 'aa-tv-hide') hideChartSoon();
 });
 
@@ -963,3 +985,97 @@ if (rec && rec.enc) {
 }
 // Fetch the engine while the user fills in the form.
 if ('requestIdleCallback' in window) requestIdleCallback(() => loadEngine().catch(() => { engineReady = null; }));
+
+// ------------------------------------------------------------------------- change an order's limit price
+// Opened from a limit price in the report. The frame only names the order and passes reference prices to
+// show; everything that is sent (which order, its legs and quantity, the old price) comes from the order as
+// Alpaca returned it. Nothing is sent before the second, explicit confirmation.
+const NOT_REPLACEABLE = { accepted: 'accepted (queued, not yet at the exchange)', pending_new: 'pending new',
+  pending_cancel: 'being cancelled', pending_replace: 'already being changed' };
+let ordCur = null;
+const money2 = (v) => '$' + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const dc = (v, mleg) => (mleg ? `${money2(v)} ${v < 0 ? 'credit' : v > 0 ? 'debit' : 'even'}` : money2(v));
+function legText(o) {
+  const legs = o.legs?.length ? o.legs : [o];
+  return legs.map((l) => {
+    const m = OCC.exec(l.symbol || '');
+    const what = m ? `${m[2].slice(2, 4)}/${m[2].slice(4, 6)} ${+m[4] / 1000}${m[3]}` : l.symbol;
+    const q = +(l.ratio_qty || 1);
+    return `${l.side === 'sell' ? 'sell' : 'buy'} ${q !== 1 ? q + '× ' : ''}${what}`;
+  }).join(', ');
+}
+function openOrderDialog(d) {
+  if (typeof d.id !== 'string' || !/^[0-9a-f-]{8,64}$/i.test(d.id)) return;
+  const o = lastOrders.find((x) => x.id === d.id);
+  const dlg = $('ordDlg');
+  $('ordErr').hidden = true; $('ordConfirm').hidden = true;
+  $('ordGo').textContent = 'Review change'; $('ordGo').disabled = false;
+  if (!o || o.type !== 'limit' || o.limit_price == null) {
+    $('ordWhat').textContent = 'This order is no longer open or has no limit price to change. Refresh to update the report.';
+    $('ordRefs').textContent = ''; $('ordPx').closest('.ordrow').hidden = true; $('ordGo').disabled = true;
+    ordCur = null; dlg.showModal(); return;
+  }
+  $('ordPx').closest('.ordrow').hidden = false;
+  const mleg = o.order_class === 'mleg';
+  const und = (OCC.exec((o.legs?.[0] || o).symbol || '') || [])[1] || o.symbol;
+  const qty = +o.qty;
+  const lim = +o.limit_price;
+  ordCur = { id: o.id, mleg, qty, lim, und };
+  const ref = d.ref && typeof d.ref === 'object' ? d.ref : {};
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const label = typeof ref.label === 'string' ? ref.label.slice(0, 160) : `${und} · ${legText(o)}`;
+  $('ordWhat').textContent = `${label} · ${qty} ${mleg ? (qty === 1 ? 'spread' : 'spreads') : (qty === 1 ? 'contract' : 'contracts')} · ${(o.time_in_force || '').toUpperCase()} · ${o.status}` +
+    (lastCreds?.env === 'paper' ? ' · paper account' : ' · LIVE account');
+  const refs = [['now', mleg ? lim : (o.side === 'sell' ? -lim : lim)], ['mid', num(ref.mid)], ['natural', num(ref.natural)], ['est.', num(ref.est)]]
+    .filter(([, v]) => v !== null).map(([k, v]) => `${k} ${dc(v, true)}`);
+  $('ordRefs').textContent = refs.join(' · ');
+  $('ordPx').value = Math.abs(lim).toFixed(2);
+  $('ordSide').value = lim < 0 ? 'credit' : 'debit';
+  $('ordSideL').hidden = !mleg;
+  $('ordPx').previousSibling.textContent = mleg ? 'New limit (per spread)' : `New limit (per contract, ${o.side === 'sell' ? 'sell' : 'buy'})`;
+  if (NOT_REPLACEABLE[o.status]) {
+    $('ordErr').textContent = `Alpaca can't change an order while it is ${NOT_REPLACEABLE[o.status]}. Try again once it is working (status "new"), or cancel and re-enter it in Alpaca.`;
+    $('ordErr').hidden = false;
+  }
+  dlg.showModal();
+  $('ordPx').focus(); $('ordPx').select();
+}
+function newLimit() {
+  const v = Number($('ordPx').value);
+  if (!Number.isFinite(v) || v < 0 || v > 100000) return null;
+  const r = Math.round(v * 100) / 100;
+  return ordCur.mleg && $('ordSide').value === 'credit' ? -r : r;
+}
+for (const id of ['ordPx', 'ordSide']) $(id).addEventListener('input', () => {
+  $('ordConfirm').hidden = true; $('ordGo').textContent = 'Review change'; $('ordErr').hidden = true;
+});
+$('ordCancel').addEventListener('click', () => $('ordDlg').close());
+$('ordGo').addEventListener('click', async () => {
+  if (!ordCur || !lastCreds) return;
+  const nl = newLimit();
+  if (nl === null) { $('ordErr').textContent = 'Enter a price, e.g. 2.45.'; $('ordErr').hidden = false; return; }
+  if ($('ordConfirm').hidden) {           // first click: show exactly what will be sent
+    if (nl === ordCur.lim) { $('ordErr').textContent = 'That is the current limit.'; $('ordErr').hidden = false; return; }
+    const tot = Math.abs(nl) * ordCur.qty * 100;
+    const sideTot = ordCur.mleg ? (nl < 0 ? `receive ${money2(tot)}` : nl > 0 ? `pay ${money2(tot)}` : 'no premium') : `${money2(tot)}`;
+    $('ordConfirm').textContent = `Replace the order's limit ${dc(ordCur.lim, ordCur.mleg)} → ${dc(nl, ordCur.mleg)} ` +
+      `(${ordCur.qty} × 100: ${sideTot} if it fills, before fees). Alpaca cancels the old order and places the new one at once.`;
+    $('ordConfirm').hidden = false;
+    $('ordGo').textContent = 'Confirm change';
+    return;
+  }
+  $('ordGo').disabled = true; $('ordGo').textContent = 'Sending…';
+  try {
+    const res = await new Alpaca(lastCreds).replaceOrder(ordCur.id, { limit_price: nl.toFixed(2) });
+    $('ordDlg').close();
+    $('refreshStatus').classList.remove('err');
+    const done = `· ${ordCur.und} order changed to ${dc(nl, ordCur.mleg)} (Alpaca status: ${res.status || 'sent'})`;
+    $('refreshStatus').textContent = done + '; refreshing…';
+    await new Promise((r) => setTimeout(r, 800));       // let Alpaca list the new order
+    await refresh();
+    if (!$('refreshStatus').classList.contains('err')) $('refreshStatus').textContent = done;
+  } catch (e) {
+    $('ordErr').textContent = e.message || String(e); $('ordErr').hidden = false;
+    $('ordGo').disabled = false; $('ordGo').textContent = 'Confirm change';
+  }
+});
