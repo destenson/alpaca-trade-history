@@ -68,6 +68,8 @@ pub enum Cell {
     I(i64),
     /// text shown, number sorted by
     T(String, f64),
+    /// text with a hover note
+    Tip(String, String),
     N,
 }
 
@@ -379,6 +381,7 @@ pub fn table(t: &Tbl, tid: &str, pnl_cols: &[&str]) -> String {
                     Cell::I(i) => i.to_string(),
                     Cell::S(s) => s.clone(),
                     Cell::T(s, _) => s.clone(),
+                    Cell::Tip(s, _) => s.clone(),
                 },
             };
             let (txt, sign) = unsign(&txt);
@@ -412,6 +415,10 @@ pub fn table(t: &Tbl, tid: &str, pnl_cols: &[&str]) -> String {
             } else {
                 cur(&esc(&txt))
             };
+            let html = match v {
+                Cell::Tip(_, note) => format!("<span data-tip=\"{}\" tabindex=\"0\">{}</span>", esc(note), html),
+                _ => html,
+            };
             let html = if ci == 0 { format!("{}{}", std::mem::take(&mut toggle), html) } else { html };
             body.push_str(&format!("<td data-v=\"{}\"{}>{}</td>", esc(&raw), cls, html));
         }
@@ -431,13 +438,10 @@ pub fn lim(v: f64) -> String {
     }
 }
 
-/// A max loss that is actually a gain (the worst outcome still makes money): 'none (worst +$X)'.
+/// Max loss; a worst case that is still a gain (e.g. an inverted strangle bought at $0) shows as that
+/// gain, which the table colors blue.
 pub fn lim_loss(v: f64) -> String {
-    if v.is_finite() && v > 0.0 {
-        format!("none (worst {})", money(v, true, 2))
-    } else {
-        lim(v)
-    }
+    lim(v)
 }
 
 pub fn flim_loss() -> impl Fn(&Cell) -> String {
@@ -593,7 +597,11 @@ impl<'a> Report<'a> {
             unds.dedup();
             let qt = rp::quote_times(&a.bundle.option_snapshots);
             let fb: std::collections::HashMap<String, Option<f64>> = unds.iter().map(|u| (u.clone(), spot_from(a, u))).collect();
-            self.market = Some(rp::market_state(a.bundle.clock.as_ref(), Some(&a.bundle.stock_snapshots), &unds, &qt, &fb, &self.now));
+            let mut m = rp::market_state(a.bundle.clock.as_ref(), Some(&a.bundle.stock_snapshots), &unds, &qt, &fb, &self.now);
+            for u in m.underlyings.values_mut() {
+                u.realized_vol = a.bundle.intraday.get(&u.symbol).and_then(rp::realized_vol);
+            }
+            self.market = Some(m);
             self.market_ready = true;
             self.rp_views = vec![];
         }

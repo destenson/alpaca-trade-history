@@ -19,6 +19,8 @@ pub struct Bundle {
     pub positions: Vec<Value>,
     pub account: Option<Value>,
     pub bars: Value,
+    /// recent 5-minute closes for underlyings whose option legs have no quotes yet
+    pub intraday: Value,
     pub prices: IndexMap<String, f64>,
     pub option_snapshots: Value,
     pub orders: Vec<Value>,

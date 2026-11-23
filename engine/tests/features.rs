@@ -124,8 +124,61 @@ fn orders_on_contracts_with_no_quotes_yet() {
     assert!(approx(o.max_loss, 30.0 * 100.0 * 10.0));          // worst case at expiration is still a $30/share gain
     let r = reports(&b, &json!({}));
     let full = r["full"].as_str().unwrap();
-    for s in ["Long strangle (no quotes yet)", "no quotes yet</td>", "none (worst +", "1 on contracts with no quotes yet"] {
+    for s in ["data-tip=\"No quotes yet: these contracts haven&#x27;t traded. Nothing to estimate", "no quotes yet</td>", "1 on contracts with no quotes yet"] {
         assert!(full.contains(s), "{s}");
+    }
+}
+
+fn zigzag_bars(days: &[&str]) -> Value {
+    // 78 regular-session 5-minute closes a day alternating 100 / 101, plus an after-hours print that is ignored
+    let mut v = vec![];
+    for d in days {
+        for k in 0..78 {
+            let m = 14 * 60 + 30 + 5 * k;
+            v.push(json!({"t": format!("{d}T{:02}:{:02}:00Z", m / 60, m % 60), "c": if k % 2 == 0 { 100.0 } else { 101.0 }}));
+        }
+        v.push(json!({"t": format!("{d}T22:00:00Z"), "c": 150.0}));
+    }
+    Value::Array(v)
+}
+
+#[test]
+fn realized_vol_from_intraday_bars() {
+    let bars = zigzag_bars(&["2026-11-19", "2026-11-20"]);
+    // 155 returns of ln(1.01) (77 a session + the overnight one) over 2 days, annualized with 252 days
+    let want = (1.01f64.ln().powi(2) * 155.0 / 2.0 * 252.0).sqrt();
+    assert!(approx(rp::realized_vol(&bars).unwrap(), want));
+    assert!(rp::realized_vol(&json!([{"t": "2026-11-19T15:00:00Z", "c": 1.0}])).is_none());
+}
+
+#[test]
+fn unquoted_contracts_priced_from_realized_vol() {
+    // same $0 strangle, but nothing on the chain has a quote or an IV: price it from the stock's own volatility
+    let (mut b, _) = fixture("08_order_estimate_and_report_inputs");
+    b["option_snapshots"] = json!({});
+    b["intraday"] = json!({"ZS": zigzag_bars(&["2026-11-19", "2026-11-20"])});
+    b["orders"] = json!([{"id": "ant", "order_class": "mleg", "type": "limit", "qty": "10", "filled_qty": "0", "limit_price": "0",
+        "status": "accepted", "time_in_force": "gtc", "submitted_at": "2026-11-22T03:26:01Z",
+        "legs": [{"symbol": "ZS261218C00200000", "side": "buy", "position_intent": "buy_to_open", "ratio_qty": "1"},
+                 {"symbol": "ZS261218P00230000", "side": "buy", "position_intent": "buy_to_open", "ratio_qty": "1"}]}]);
+    let r = reports(&b, &json!({}));
+    let full = r["full"].as_str().unwrap();
+    assert!(full.contains("Estimates use ZS&#x27;s own 139% realized volatility"), "tooltip");
+    assert!(!full.contains("no quotes yet</td>"), "fill odds are simulated now");
+    for s in [">Fill</th>", "Fill &amp; profit", "Expected fills"] {
+        assert!(full.contains(s), "{s}");
+    }
+}
+
+#[test]
+fn fill_odds_include_profit_if_filled() {
+    let b = zs_bundle(2.0, "gtc");
+    let (o, m) = zs_order(&b);
+    let f = fill_odds(&o, &m, 0.0).unwrap();
+    assert!(approx(f.p_fill, f.expiry.unwrap()));
+    assert!(f.fill_and_profit <= f.p_fill + 1e-12);
+    if let Some(p) = f.profit_if_filled {
+        assert!(approx(p * f.p_fill, f.fill_and_profit));
     }
 }
 

@@ -301,6 +301,28 @@ class Alpaca {
     return out;
   }
 
+  // 5-minute closes over the last two weeks (regular and extended hours; the engine keeps the regular session)
+  async intradayBars(symbols) {
+    const out = {};
+    const params = { symbols: symbols.join(','), timeframe: '5Min', start: iso(new Date(Date.now() - 14 * 864e5)),
+      end: iso(new Date(Date.now() - 16 * 60e3)), limit: 10000 };
+    for (const feed of [undefined, 'iex']) {
+      try {
+        const p = { ...params, feed };
+        for (;;) {
+          const r = await this.get(`${DATA}/v2/stocks/bars`, p);
+          for (const [sym, bars] of Object.entries(r.bars || {})) (out[sym] ||= []).push(...bars.map((b) => ({ t: b.t, c: b.c })));
+          if (!r.next_page_token) break;
+          p.page_token = r.next_page_token;
+        }
+        return out;
+      } catch (e) {
+        if (e.status !== 403 || feed) return out;
+      }
+    }
+    return out;
+  }
+
   async optionSnapshots(symbols) {
     const out = {};
     for (let i = 0; i < symbols.length; i += 100) {
@@ -364,6 +386,22 @@ function tradedUnderlyings(acts) {
     s.add(m ? m[1] : a.symbol);
   }
   return [...s].filter((x) => /^[A-Z][A-Z.]{0,6}$/.test(x));
+}
+
+// Underlyings of open option orders where no contract has a quote, a trade or an implied volatility yet
+// (a newly listed chain): the engine prices those legs from the stock's own recent volatility instead.
+function unquotedUnderlyings(orders, snaps) {
+  const quoted = new Set(), all = new Set();
+  const has = (s) => s && ((s.latestQuote && (s.latestQuote.bp > 0 || s.latestQuote.ap > 0)) || s.latestTrade?.p > 0 || s.impliedVolatility > 0);
+  for (const [sym, s] of Object.entries(snaps || {})) if (has(s)) quoted.add(OCC.exec(sym)?.[1]);
+  for (const sym of orderOptionSymbols(orders)) all.add(OCC.exec(sym)[1]);
+  return [...all].filter((u) => !quoted.has(u)).sort();
+}
+async function addIntraday(api, b) {
+  const want = unquotedUnderlyings(b.orders, b.option_snapshots);
+  if (!want.length) { b.intraday = {}; return; }
+  step(`No option quotes yet for ${want.join(', ')}: loading recent 5-minute prices to estimate volatility…`);
+  try { b.intraday = await api.intradayBars(want); } catch (_) { b.intraday = {}; }
 }
 
 function orderOptionSymbols(orders) {
@@ -477,6 +515,7 @@ async function fetchBundle(creds, benchmarks, force = false) {
         b.bars = { ...b.bars, ...await api.dailyBars(needBars, b.barStart) };
         b.barsTried = [...tried, ...needBars];
       }
+      await addIntraday(api, b);
       await saveCache(creds, { ...b, savedAt: cache.savedAt });
       return { bundle: b, meta: { mode: 'closed', calls: api.calls, savedAt: cache.savedAt } };
     }
@@ -550,6 +589,7 @@ async function fetchBundle(creds, benchmarks, force = false) {
   const orders = pre ? pre.orders : await api.openOrders();
   const snaps = await fetchSnapshots(api, positions, orders, tradedUnderlyings(activities), bars, cache);
   const bundle = { account, activities, portfolio_history, positions, bars, orders, ...snaps };
+  await addIntraday(api, bundle);
   await saveCache(creds, { ...bundle, barStart, barsFullAt, barsTried, savedAt: now });
   return { bundle, meta: { mode: cache ? 'update' : 'full', calls: api.calls, newActs: newActs.length } };
 }

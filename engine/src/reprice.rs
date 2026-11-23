@@ -160,6 +160,9 @@ pub struct Underlying {
     pub refp: Option<f64>,
     pub spot: Option<f64>,
     pub quote_time: Option<Ts>,
+    /// annualized volatility the stock has shown on recent intraday bars (used only when its options
+    /// have no quotes or implied volatility yet)
+    pub realized_vol: Option<f64>,
 }
 
 impl Underlying {
@@ -317,6 +320,12 @@ pub fn calibrate(symbol: &str, snap: &Value, und: &Underlying, market: &Market, 
             src = "underlying avg";
         }
     }
+    if iv.is_none() {
+        if let Some(v) = und.realized_vol {
+            iv = Some(v);
+            src = "realized vol";
+        }
+    }
     let iv = iv.unwrap_or_else(|| {
         src = "default";
         0.5
@@ -365,4 +374,32 @@ mod tests {
         let td = trading_days(&fri, &mon);
         assert!((td - (8.0 / 24.0 + 9.5 / 24.0)).abs() < 1e-9, "{}", td);
     }
+}
+
+/// Annualized volatility from a series of intraday closes ([{t, c}, ...], oldest first): the squared log
+/// returns between consecutive regular-session bars (overnight gaps included) summed per trading day,
+/// times 252.
+/// None with fewer than 20 returns.
+pub fn realized_vol(bars: &Value) -> Option<f64> {
+    // regular-session bars only: thin pre/after-hours prints add noise, and the overnight move still
+    // shows up as the return from one session's last bar to the next session's first
+    let open = NaiveTime::from_hms_opt(9, 30, 0).unwrap();
+    let close = NaiveTime::from_hms_opt(16, 0, 0).unwrap();
+    let mut pts: Vec<(Ts, f64)> = jv::arr(Some(bars))
+        .iter()
+        .filter_map(|b| Some((ts(&jv::s(b, "t"))?, jv::fpos(b, "c")?)))
+        .filter(|(t, _)| {
+            let n = to_ny(t).time();
+            n >= open && n < close
+        })
+        .collect();
+    pts.sort_by_key(|p| p.0);
+    if pts.len() < 21 {
+        return None;
+    }
+    let ss: f64 = pts.windows(2).map(|w| (w[1].1 / w[0].1).ln().powi(2)).sum();
+    let mut days: Vec<NaiveDate> = pts.iter().map(|p| ny_date(&p.0)).collect();
+    days.dedup();
+    let v = (ss / days.len() as f64 * 252.0).sqrt();
+    (v.is_finite() && v > 0.0).then_some(v)
 }

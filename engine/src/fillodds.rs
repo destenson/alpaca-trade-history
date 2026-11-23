@@ -23,6 +23,14 @@ pub struct FillOdds {
     pub last_day: NaiveDate,
     pub h: [Option<f64>; 5],
     pub expiry: Option<f64>,
+    /// chance the order fills (before it expires; this session for DAY orders)
+    pub p_fill: f64,
+    /// chance it fills and then finishes in profit at the first expiration
+    pub fill_and_profit: f64,
+    /// chance of a profit at the first expiration given that it filled (None if no path filled)
+    pub profit_if_filled: Option<f64>,
+    /// expected P&L at the first expiration given that it filled at the limit, whole order in $
+    pub ev_if_filled: Option<f64>,
 }
 
 fn ncdf(x: f64) -> f64 {
@@ -219,6 +227,22 @@ pub fn fill_odds(po: &PendingOrder, market: &Market, iv_shift: f64) -> Option<Fi
             break;
         }
     }
+    // carry every path on to the first expiration (one exact lognormal step) and settle the filled ones
+    let t_end = models.iter().map(|m| m.2).fold(f64::INFINITY, f64::min) * rp::TRADING_DAYS;
+    if t_end > elapsed {
+        step(&mut log_s, t_end - elapsed, &mut rng);
+    }
+    let (mut n_fill, mut n_win, mut pnl) = (0usize, 0usize, 0.0);
+    for i in 0..np {
+        if hit_at[i] != usize::MAX {
+            let p = value(log_s[i].exp(), t_end.max(elapsed)) - net;
+            n_fill += 1;
+            pnl += p;
+            if p > tol {
+                n_win += 1;
+            }
+        }
+    }
     let frac = |h: usize| hit_at.iter().filter(|x| **x <= h).count() as f64 / np as f64;
     let mut hs = [None; 5];
     for (i, h) in HORIZONS.iter().enumerate() {
@@ -231,6 +255,10 @@ pub fn fill_odds(po: &PendingOrder, market: &Market, iv_shift: f64) -> Option<Fi
         gtc,
         last_day,
         h: hs,
-        expiry: if gtc { Some(hit_at.iter().filter(|x| **x != usize::MAX).count() as f64 / np as f64) } else { None },
+        expiry: if gtc { Some(n_fill as f64 / np as f64) } else { None },
+        p_fill: n_fill as f64 / np as f64,
+        fill_and_profit: n_win as f64 / np as f64,
+        profit_if_filled: if n_fill > 0 { Some(n_win as f64 / n_fill as f64) } else { None },
+        ev_if_filled: if n_fill > 0 { Some(pnl / n_fill as f64 * po.units * po.mult()) } else { None },
     })
 }

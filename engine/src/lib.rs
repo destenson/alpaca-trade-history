@@ -48,6 +48,7 @@ pub fn bundle_from_json(d: &Value) -> Bundle {
         positions: arr("positions"),
         account: opt("account"),
         bars: obj_or_empty("bars"),
+        intraday: obj_or_empty("intraday"),
         prices,
         option_snapshots: obj_or_empty("option_snapshots"),
         orders: arr("orders"),
