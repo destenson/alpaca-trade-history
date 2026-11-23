@@ -226,24 +226,32 @@ class Alpaca {
 
   account() { return this.get(`${this.base}/v2/account`); }
 
-  // Change an open order (Alpaca replaces it with a new order id). Not retried: a repeat could act twice.
-  async replaceOrder(id, body) {
+  // Order changes. Never retried: a repeat could act twice. Errors carry Alpaca's message.
+  async send(method, path, body) {
     this.calls++;
     let r;
     try {
-      r = await fetch(`${this.base}/v2/orders/${encodeURIComponent(id)}`, { method: 'PATCH', referrerPolicy: 'no-referrer', cache: 'no-store',
-        headers: { ...this.headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      r = await fetch(`${this.base}${path}`, { method, referrerPolicy: 'no-referrer', cache: 'no-store',
+        headers: body ? { ...this.headers, 'Content-Type': 'application/json' } : this.headers, body: body ? JSON.stringify(body) : undefined });
     } catch (e) {
-      throw new Error('Network error: the change may not have reached Alpaca. Refresh to see the order as it stands.');
+      const err = new Error('network error: the request may or may not have reached Alpaca');
+      err.network = true;
+      throw err;
     }
     const text = await r.text();
     if (!r.ok) {
       let msg = text;
       try { msg = JSON.parse(text).message || text; } catch (_) { /* not JSON */ }
-      throw new Error(`Alpaca refused the change (${r.status}): ${msg.slice(0, 300)}`);
+      const err = new Error(`${r.status}: ${msg.slice(0, 300)}`);
+      err.status = r.status;
+      throw err;
     }
-    return JSON.parse(text);
+    return text ? JSON.parse(text) : null;
   }
+  replaceOrder(id, body) { return this.send('PATCH', `/v2/orders/${encodeURIComponent(id)}`, body); }
+  cancelOrder(id) { return this.send('DELETE', `/v2/orders/${encodeURIComponent(id)}`); }
+  getOrder(id) { return this.send('GET', `/v2/orders/${encodeURIComponent(id)}?nested=true`); }
+  placeOrder(body) { return this.send('POST', '/v2/orders', body); }
   positions() { return this.get(`${this.base}/v2/positions`); }
   clock() { return this.get(`${this.base}/v2/clock`); }
   openOrders() { return this.get(`${this.base}/v2/orders?status=open&nested=true&limit=500&direction=desc`); }
@@ -1009,7 +1017,7 @@ function openOrderDialog(d) {
   const o = lastOrders.find((x) => x.id === d.id);
   const dlg = $('ordDlg');
   $('ordErr').hidden = true; $('ordConfirm').hidden = true;
-  $('ordGo').textContent = 'Review change'; $('ordGo').disabled = false;
+  $('ordGo').textContent = 'Review change'; $('ordGo').disabled = false; $('ordMode').hidden = true;
   if (!o || o.type !== 'limit' || o.limit_price == null) {
     $('ordWhat').textContent = 'This order is no longer open or has no limit price to change. Refresh to update the report.';
     $('ordRefs').textContent = ''; $('ordPx').closest('.ordrow').hidden = true; $('ordGo').disabled = true;
@@ -1020,7 +1028,9 @@ function openOrderDialog(d) {
   const und = (OCC.exec((o.legs?.[0] || o).symbol || '') || [])[1] || o.symbol;
   const qty = +o.qty;
   const lim = +o.limit_price;
-  ordCur = { id: o.id, mleg, qty, lim, und };
+  // Alpaca can't change an order in place while it is "accepted" (held until the session opens): cancel it
+  // and place the same order at the new price instead, after its own confirmation
+  ordCur = { id: o.id, mleg, qty, lim, und, order: o, recreate: o.status === 'accepted' };
   const ref = d.ref && typeof d.ref === 'object' ? d.ref : {};
   const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
   const label = typeof ref.label === 'string' ? ref.label.slice(0, 160) : `${und} · ${legText(o)}`;
@@ -1033,12 +1043,28 @@ function openOrderDialog(d) {
   $('ordSide').value = lim < 0 ? 'credit' : 'debit';
   $('ordSideL').hidden = !mleg;
   $('ordPx').previousSibling.textContent = mleg ? 'New limit (per spread)' : `New limit (per contract, ${o.side === 'sell' ? 'sell' : 'buy'})`;
-  if (NOT_REPLACEABLE[o.status]) {
-    $('ordErr').textContent = `Alpaca can't change an order while it is ${NOT_REPLACEABLE[o.status]}. Try again once it is working (status "new"), or cancel and re-enter it in Alpaca.`;
+  setOrdMode();
+  if (NOT_REPLACEABLE[o.status] && !ordCur.recreate) {
+    $('ordErr').textContent = `Alpaca can't change an order while it is ${NOT_REPLACEABLE[o.status]}. Try again in a moment.`;
     $('ordErr').hidden = false;
   }
   dlg.showModal();
   $('ordPx').focus(); $('ordPx').select();
+}
+function setOrdMode() {
+  $('ordConfirm').hidden = true;
+  $('ordGo').disabled = false;
+  $('ordGo').textContent = ordCur?.recreate ? 'Review cancel & re-place' : 'Review change';
+  $('ordMode').hidden = !ordCur?.recreate;
+}
+// the same order (legs, quantity, sides, time in force) at a new limit
+function orderBody(o, nl) {
+  const base = { type: 'limit', qty: o.qty, time_in_force: o.time_in_force, limit_price: nl.toFixed(2) };
+  if (o.order_class === 'mleg') {
+    return { ...base, order_class: 'mleg',
+      legs: o.legs.map((l) => ({ symbol: l.symbol, ratio_qty: l.ratio_qty, side: l.side, position_intent: l.position_intent })) };
+  }
+  return { ...base, symbol: o.symbol, side: o.side, position_intent: o.position_intent };
 }
 function newLimit() {
   const v = Number($('ordPx').value);
@@ -1046,36 +1072,80 @@ function newLimit() {
   const r = Math.round(v * 100) / 100;
   return ordCur.mleg && $('ordSide').value === 'credit' ? -r : r;
 }
-for (const id of ['ordPx', 'ordSide']) $(id).addEventListener('input', () => {
-  $('ordConfirm').hidden = true; $('ordGo').textContent = 'Review change'; $('ordErr').hidden = true;
-});
+for (const id of ['ordPx', 'ordSide']) $(id).addEventListener('input', () => { setOrdMode(); $('ordErr').hidden = true; });
 $('ordCancel').addEventListener('click', () => $('ordDlg').close());
+async function afterOrderChange(msg, err) {
+  $('ordDlg').close();
+  $('refreshStatus').classList.toggle('err', !!err);
+  $('refreshStatus').textContent = msg + '; refreshing…';
+  await new Promise((r) => setTimeout(r, 800));       // let Alpaca list the new order
+  await refresh();
+  if (!$('refreshStatus').classList.contains('err') || err) {
+    $('refreshStatus').textContent = msg;
+    $('refreshStatus').classList.toggle('err', !!err);
+  }
+}
+const showOrdErr = (t) => { $('ordErr').textContent = t; $('ordErr').hidden = false; };
 $('ordGo').addEventListener('click', async () => {
   if (!ordCur || !lastCreds) return;
   const nl = newLimit();
-  if (nl === null) { $('ordErr').textContent = 'Enter a price, e.g. 2.45.'; $('ordErr').hidden = false; return; }
+  if (nl === null) { showOrdErr('Enter a price, e.g. 2.45.'); return; }
+  const c = ordCur;
   if ($('ordConfirm').hidden) {           // first click: show exactly what will be sent
-    if (nl === ordCur.lim) { $('ordErr').textContent = 'That is the current limit.'; $('ordErr').hidden = false; return; }
-    const tot = Math.abs(nl) * ordCur.qty * 100;
-    const sideTot = ordCur.mleg ? (nl < 0 ? `receive ${money2(tot)}` : nl > 0 ? `pay ${money2(tot)}` : 'no premium') : `${money2(tot)}`;
-    $('ordConfirm').textContent = `Replace the order's limit ${dc(ordCur.lim, ordCur.mleg)} → ${dc(nl, ordCur.mleg)} ` +
-      `(${ordCur.qty} × 100: ${sideTot} if it fills, before fees). Alpaca cancels the old order and places the new one at once.`;
+    if (nl === c.lim) { showOrdErr('That is the current limit.'); return; }
+    const tot = Math.abs(nl) * c.qty * 100;
+    const sideTot = c.mleg ? (nl < 0 ? `receive ${money2(tot)}` : nl > 0 ? `pay ${money2(tot)}` : 'no premium') : `${money2(tot)}`;
+    const what = `${dc(c.lim, c.mleg)} → ${dc(nl, c.mleg)} (${c.qty} × 100: ${sideTot} if it fills, before fees)`;
+    $('ordConfirm').textContent = c.recreate
+      ? `Cancel this order, then place the same order (same legs, quantity and ${(c.order.time_in_force || '').toUpperCase()}) at the new limit: ${what}. ` +
+        'Two separate steps: if Alpaca rejects the new order, you will be left with no order, and this page will say so.'
+      : `Replace the order's limit ${what}. Alpaca cancels the old order and places the new one at once.`;
     $('ordConfirm').hidden = false;
-    $('ordGo').textContent = 'Confirm change';
+    $('ordGo').textContent = c.recreate ? 'Confirm cancel & re-place' : 'Confirm change';
     return;
   }
   $('ordGo').disabled = true; $('ordGo').textContent = 'Sending…';
+  const api = new Alpaca(lastCreds);
+  if (!c.recreate) {
+    try {
+      const res = await api.replaceOrder(c.id, { limit_price: nl.toFixed(2) });
+      await afterOrderChange(`· ${c.und} order changed to ${dc(nl, c.mleg)} (Alpaca status: ${res?.status || 'sent'})`);
+    } catch (e) {
+      if (e.status === 422 && /accepted/i.test(e.message)) {     // became (or still is) "accepted": offer cancel & re-place
+        c.recreate = true; setOrdMode();
+        showOrdErr(`Alpaca can't change it in place: ${e.message}. You can cancel it and place it again at the new price instead.`);
+        return;
+      }
+      showOrdErr(`Alpaca refused the change (${e.message}). The order is unchanged.`);
+      $('ordGo').disabled = false; $('ordGo').textContent = 'Confirm change';
+    }
+    return;
+  }
+  // cancel & re-place
   try {
-    const res = await new Alpaca(lastCreds).replaceOrder(ordCur.id, { limit_price: nl.toFixed(2) });
-    $('ordDlg').close();
-    $('refreshStatus').classList.remove('err');
-    const done = `· ${ordCur.und} order changed to ${dc(nl, ordCur.mleg)} (Alpaca status: ${res.status || 'sent'})`;
-    $('refreshStatus').textContent = done + '; refreshing…';
-    await new Promise((r) => setTimeout(r, 800));       // let Alpaca list the new order
-    await refresh();
-    if (!$('refreshStatus').classList.contains('err')) $('refreshStatus').textContent = done;
+    await api.cancelOrder(c.id);
   } catch (e) {
-    $('ordErr').textContent = e.message || String(e); $('ordErr').hidden = false;
-    $('ordGo').disabled = false; $('ordGo').textContent = 'Confirm change';
+    showOrdErr(`Alpaca refused to cancel the order (${e.message}). Nothing was changed.`);
+    $('ordGo').disabled = false; $('ordGo').textContent = 'Confirm cancel & re-place';
+    return;
+  }
+  $('ordGo').textContent = 'Cancelling…';
+  let st = '';
+  for (let i = 0; i < 20; i++) {         // wait for the cancel to be confirmed before placing the new order
+    try { st = (await api.getOrder(c.id))?.status || ''; } catch (_) { st = ''; }
+    if (['canceled', 'filled', 'expired', 'rejected'].includes(st)) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  if (st === 'filled') { await afterOrderChange(`· ${c.und} order filled before it could be cancelled; nothing new was placed`, true); return; }
+  if (st !== 'canceled' && st !== 'expired') {
+    await afterOrderChange(`· ${c.und} cancel requested but not confirmed (status ${st || 'unknown'}); nothing new was placed. Check the order in Alpaca`, true);
+    return;
+  }
+  $('ordGo').textContent = 'Placing…';
+  try {
+    const res = await api.placeOrder(orderBody(c.order, nl));
+    await afterOrderChange(`· ${c.und} order cancelled and placed again at ${dc(nl, c.mleg)} (Alpaca status: ${res?.status || 'sent'})`);
+  } catch (e) {
+    await afterOrderChange(`· ${c.und}: the old order was cancelled, but Alpaca rejected the new one (${e.message}). You have no order for it now`, true);
   }
 });
