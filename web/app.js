@@ -736,11 +736,24 @@ function setTheme(t) {
 $('themeBtn').addEventListener('click', () => setTheme(effectiveTheme() === 'dark' ? 'light' : 'dark'));
 darkMQ.addEventListener('change', syncFrameTheme);
 $('frame').addEventListener('load', syncFrameTheme);
+// charts the viewer switched to log scale (ids only), restored into every report
+const LOG_STORE = 'alpaca-analyzer.logcharts';
+function logCharts() {
+  try { return (JSON.parse(localStorage.getItem(LOG_STORE) || '[]') || []).filter((x) => typeof x === 'string'); }
+  catch (_) { return []; }
+}
 window.addEventListener('message', (e) => {
   if (e.source !== $('frame').contentWindow || !e.data || typeof e.data !== 'object') return;
   if (e.data.type === 'aa-ready') {
     syncFrameTheme();
     if (currentTab) $('frame').contentWindow.postMessage({ type: 'aa-set-tab', tab: currentTab }, '*');
+    const ids = logCharts();
+    if (ids.length) $('frame').contentWindow.postMessage({ type: 'aa-set-log', ids }, '*');
+  }
+  if (e.data.type === 'aa-log' && typeof e.data.id === 'string' && /^f_[a-z0-9_]{1,40}$/.test(e.data.id)) {
+    const ids = new Set(logCharts());
+    if (e.data.on) ids.add(e.data.id); else ids.delete(e.data.id);
+    try { localStorage.setItem(LOG_STORE, JSON.stringify([...ids])); } catch (_) { /* storage unavailable */ }
   }
   if (e.data.type === 'aa-tab' && typeof e.data.tab === 'string' && /^[a-z]{1,30}$/.test(e.data.tab)) currentTab = e.data.tab;
   if (e.data.type === 'aa-theme' && (e.data.theme === 'light' || e.data.theme === 'dark')) setTheme(e.data.theme);

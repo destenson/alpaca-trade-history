@@ -192,6 +192,9 @@ window.addEventListener('message', (e) => {
   if (!EMBEDDED || e.source !== window.parent || !e.data) return;
   if (e.data.type === 'aa-set-theme') setTheme(e.data.theme, false);
   if (e.data.type === 'aa-set-tab' && typeof e.data.tab === 'string') show(e.data.tab);
+  if (e.data.type === 'aa-set-log' && Array.isArray(e.data.ids)) {
+    for (const id of e.data.ids) if (typeof id === 'string') setLog(id, true, false);
+  }
 });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { drawn.clear(); drawVisible(); });
 // alternative readings of open positions: one view visible at a time
@@ -421,7 +424,6 @@ function symlogSpec(spec) {
     A.tickmode = 'array'; A.tickvals = kept.map(f); A.ticktext = kept.map((v) => fmt(v, true));
     delete A.tickformat; delete A.tickprefix; delete A.ticksuffix;
     if (A.range) A.range = A.range.map(f);
-    A.title = { ...(A.title || {}), text: ((A.title && A.title.text) || '') + ((A.title && A.title.text) ? ' · ' : '') + 'log scale' };
   }
   // overlaid secondary axis with a fixed range: keep its zero level with the main axis
   for (const [ax, f] of Object.entries(fwd)) {
@@ -447,6 +449,25 @@ function symlogSpec(spec) {
   }
   return { data, layout: L };
 }
+// The choice is remembered per chart: in this browser's storage when the report is opened on its own, or by
+// the web app (which owns storage) when embedded in its sandboxed frame.
+const LOG_KEY = 'aa-log';
+const logBtns = {};
+function setLog(id, on, save) {
+  const spec = FIGS[id], btn = logBtns[id];
+  if (!spec || !btn || Boolean(spec.symlog) === on) return;
+  spec.symlog = on;
+  btn.setAttribute('aria-pressed', String(on));
+  const el = document.getElementById(id);
+  if (el && el.offsetParent !== null) draw(id); else drawn.delete(id);
+  if (!save) return;
+  if (EMBEDDED) { parent.postMessage({ type: 'aa-log', id, on }, '*'); return; }
+  try {
+    const ids = new Set(JSON.parse(localStorage.getItem(LOG_KEY) || '[]'));
+    if (on) ids.add(id); else ids.delete(id);
+    localStorage.setItem(LOG_KEY, JSON.stringify([...ids]));
+  } catch (e) { /* storage unavailable */ }
+}
 for (const [id, spec] of Object.entries(FIGS)) {
   const k = logEligible(spec);
   const el = document.getElementById(id);
@@ -456,13 +477,13 @@ for (const [id, spec] of Object.entries(FIGS)) {
   btn.type = 'button'; btn.className = 'scalebtn'; btn.textContent = 'Log';
   btn.setAttribute('aria-pressed', 'false');
   btn.title = 'Switch between a linear and a logarithmic scale (negative values: −log, linear near zero)';
-  btn.addEventListener('click', () => {
-    spec.symlog = !spec.symlog;
-    btn.setAttribute('aria-pressed', String(spec.symlog));
-    draw(id);
-  });
+  btn.addEventListener('click', () => setLog(id, !spec.symlog, true));
+  logBtns[id] = btn;
   const fig = el.closest('figure') || el.parentElement;
   fig.insertBefore(btn, fig.firstChild);
+}
+if (!EMBEDDED) {
+  try { for (const id of JSON.parse(localStorage.getItem(LOG_KEY) || '[]')) setLog(id, true, false); } catch (e) { /* none */ }
 }
 // sortable tables
 document.querySelectorAll('table.sortable').forEach(t => {
