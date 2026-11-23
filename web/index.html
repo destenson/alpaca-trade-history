@@ -3,9 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- Keys may only ever be sent to Alpaca: connect-src is limited to Alpaca hosts plus the CDN that
-     serves Python/pandas. The report renders in a sandboxed frame with no access to this page's storage. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' https://cdn.jsdelivr.net https://api.alpaca.markets https://paper-api.alpaca.markets https://data.alpaca.markets; img-src 'self' data: blob:; frame-src 'self' blob:; base-uri 'none'; form-action 'none'">
+<!-- Keys may only ever be sent to Alpaca: connect-src is limited to Alpaca hosts and this site (the analysis
+     engine). The report renders in a sandboxed frame with no access to this page's storage; it loads Plotly
+     from the CDN in script-src. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.alpaca.markets https://paper-api.alpaca.markets https://data.alpaca.markets; img-src 'self' data: blob:; frame-src 'self' blob:; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>Alpaca Trade Analyzer</title>
 <link rel="stylesheet" href="style.css">
@@ -18,7 +19,7 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
   <div>
     <h1>Alpaca Trade Analyzer</h1>
     <p class="lede">P&amp;L, drawdown, benchmark and options-strategy analytics for your Alpaca account. Runs entirely in your
-      browser: your keys go only to Alpaca's API, and the analysis runs locally in Python (WebAssembly).</p>
+      browser: your keys go only to Alpaca's API, and the analysis runs locally (WebAssembly).</p>
   </div>
   <div class="tools">
     <a class="src" href="https://github.com/destenson/alpaca-trade-history" rel="noopener">Source on GitHub</a>
@@ -109,8 +110,6 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
     <iframe id="frame" title="Report" sandbox="allow-scripts allow-downloads"></iframe>
   </section>
 </main>
-<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"
-        integrity="sha384-i3R37b3tF+HWudsUf1VSEOY2YxwSNMqY8DQa9Z0O3xh+NkJ9o+yjcGyIi5huj+nB" crossorigin="anonymous"></script>
 <script type="module" src="app.js"></script>
 </body>
 </html>

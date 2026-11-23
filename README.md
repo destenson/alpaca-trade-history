@@ -13,7 +13,7 @@ Try it now [in your browser](https://destenson.github.io/alpaca-trade-history/)
 | **Overview** | Equity vs. net deposits vs. SPY/QQQ bought with the *same deposits on the same days* · KPI tiles · P&L attribution waterfall (stocks, options, unrealized, dividends, interest) reconciled to the account's P&L |
 | **Performance** | Time-weighted return vs. benchmarks · cumulative $ P&L vs. buy & hold · daily P&L · monthly returns · daily-return scatter with β/α, correlation, up/down capture · rolling 21-day volatility, Sharpe and beta · risk/return table (Sharpe, Sortino, Calmar, max DD) |
 | **Drawdown** | Underwater curve vs. benchmarks · dollar drawdown · worst drawdown episodes |
-| **Trades** | *Closed positions only.* Cumulative realized P&L (stocks/options) · P&L distribution · holding period vs. P&L · realized P&L by underlying · **your trading vs. just holding the underlying** (names fully exited, first trade → last exit) · P&L by entry weekday and hour · trade timeline · sortable table of every closed lot |
+| **Trades** | *Closed positions only.* Cumulative realized P&L (stocks/options) · P&L distribution · holding period vs. P&L · realized P&L by underlying · **your trading vs. just holding the underlying** (every name with closed lots, first trade → last closed lot) · P&L by entry weekday and hour · trade timeline · sortable table of every closed lot |
 | **Options** | P&L and win rate by strategy · cumulative P&L by strategy · P&L by DTE at entry and by time in trade · calls vs. puts, debit vs. credit · how positions ended (closed, expired, assigned, exercised) · P&L by underlying · return-on-risk distribution · moneyness at entry · **roll chains** · **payoff diagrams for open positions** (at expiration + estimated value at the next open, re-priced like open orders with the same editable price/IV inputs; shares count in 100-share lots, odd lots are left out) · position Greeks · **option profits reinvested in the underlying** (whole shares each name's winning positions would have bought at the closing day's price, vs. what you hold; a with-losses variant for comparison) · strategy table |
 | **Orders** | Unfilled option strategy orders projected **at your limit price**: risk/reward bars with IV-implied probability of profit for every order · table with mid, natural, edge vs mid, max profit/loss, reward/risk, breakevens · payoff explorer per order and for all orders on one underlying, overlaid on what you already hold there · **chance of filling** per order within 1/2/3/5/8 trading sessions and, for GTC, before it expires (Monte Carlo on the underlying at implied vol, re-pricing the spread every half hour) · **re-pricing when the stock moved after the close**: each leg's IV is calibrated to its own last quote, then re-priced (Black-Scholes) at the latest after-hours/overnight print and the time left at the next open (counted in trading days: weekends and NYSE holidays don't decay), with editable prices and IV changes per underlying that update estimates, table and charts live in the page. Closing and stock orders (take-profits) are counted, not projected. Never in the `--share` view. |
 | **Positions** | Unrealized P&L by position · concentration · holdings table |
@@ -83,9 +83,14 @@ Name, email, account number and API keys are never written to any report.
 ## Web app (GitHub Pages)
 
 `web/` is a static page that runs the same analysis for anyone with Alpaca keys, entirely in their
-browser: it calls Alpaca's API directly (GET requests only; Alpaca allows browser access) and runs
-this Python package via [Pyodide](https://pyodide.org) (WebAssembly). Nothing is sent to any other server.
-The first visit downloads ~20 MB of Python/pandas, which the browser then caches.
+browser: it calls Alpaca's API directly (GET requests only; Alpaca allows browser access) and runs the
+analysis engine in `engine/`, a Rust port of this package compiled to WebAssembly (about 0.5 MB
+compressed). Nothing is sent to any other server. A full report builds in under a second.
+
+* **Engine**: `engine/` (Rust) produces the same report as the Python package; `scripts/parity.py` builds
+  both from the same data and compares every chart and table (`cargo build --release` in `engine/` first).
+  The page talks to it through a five-function C ABI (`aa_alloc`, `aa_run`, `aa_out_ptr/len`,
+  `aa_panic_ptr/len`), so no generated glue code is needed. `cargo test --release` in `engine/` runs its tests.
 
 * **Keys**: held in memory by default (**Refresh** re-runs with them, no re-entry). "Remember keys on this
   device" stores them in `localStorage`; add a passphrase and they're stored AES-GCM-encrypted
@@ -100,15 +105,15 @@ The first visit downloads ~20 MB of Python/pandas, which the browser then caches
   download, a refresh checks just positions and open orders (2 requests), plus stock prices while an
   after-hours/overnight session trades; anything else comes from the saved copy. Bars are re-downloaded in
   full weekly and after splits. **Re-download everything** bypasses it; Lock and Forget delete it.
-* **Isolation**: a Content-Security-Policy limits network access to Alpaca's hosts and the pinned CDN
-  (scripts carry SRI hashes). The report renders in a sandboxed iframe with no access to the page's
+* **Isolation**: a Content-Security-Policy limits network access to Alpaca's hosts and this site; the
+  report's charting library comes from a pinned CDN with an SRI hash. The report renders in a sandboxed iframe with no access to the page's
   storage. Both the full and the shareable (`--share`) report can be downloaded.
-* **Updates**: every build gets new file names (`app.js?v=<build>`, a wheel with the build in its name), so a
+* **Updates**: every build gets new file names (`app.js?v=<build>`, `engine-<build>.wasm`), so a
   browser reload never runs a stale cached copy. The open page also checks for a newer deployment on
   **Refresh** and when you return to the tab, and reloads into it (back to the same report tab when kept
   unlocked; otherwise it offers a reload button).
-* **Deploy**: `.github/workflows/pages.yml` runs the tests, builds the site with
-  `python scripts/build_site.py site`, and publishes it. One-time setup: repo **Settings → Pages →
+* **Deploy**: `.github/workflows/pages.yml` runs the Rust and Python tests, builds the site with
+  `python scripts/build_site.py site` (needs `rustup target add wasm32-unknown-unknown`), and publishes it. One-time setup: repo **Settings → Pages →
   Source: GitHub Actions**.
 * **Local preview**: `python scripts/build_site.py site && python -m http.server -d site 8000`.
 

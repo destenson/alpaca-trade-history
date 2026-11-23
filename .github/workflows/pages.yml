@@ -22,7 +22,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Test
+      - name: Rust toolchain (WebAssembly target)
+        run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      - name: Test the analysis engine (Rust)
+        run: cargo test --release --manifest-path engine/Cargo.toml
+      - name: Test the Python reference / CLI
         run: |
           pip install -e '.[test]'
           pytest -q

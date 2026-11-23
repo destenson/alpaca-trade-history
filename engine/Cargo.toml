@@ -1,0 +1,22 @@
+[package]
+name = "alpaca-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Portfolio & trade analytics for Alpaca accounts, compiled to WebAssembly for the web app."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+indexmap = "2"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+libm = "0.2"
+sha1_smol = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

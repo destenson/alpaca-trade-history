@@ -1,8 +1,7 @@
 // Alpaca Trade Analyzer - static, client-side front end.
-// Data flow: browser -> Alpaca REST (GET only) -> bundle JSON -> Python (Pyodide) -> report HTML.
+// Data flow: browser -> Alpaca REST (GET only) -> bundle JSON -> analysis engine (Rust, WebAssembly) -> report HTML.
 // Credentials never leave this page except in request headers to *.alpaca.markets (enforced by CSP).
 
-const PYODIDE_INDEX = 'https://cdn.jsdelivr.net/pyodide/v0.26.4/full/';
 const STORE_KEY = 'alpaca-analyzer.credentials.v1';
 const TRADING = { live: 'https://api.alpaca.markets', paper: 'https://paper-api.alpaca.markets' };
 const DATA = 'https://data.alpaca.markets';
@@ -555,20 +554,46 @@ async function fetchBundle(creds, benchmarks, force = false) {
   return { bundle, meta: { mode: cache ? 'update' : 'full', calls: api.calls, newActs: newActs.length } };
 }
 
-// --------------------------------------------------------------------------- Python
-let pyReady = null;
-function loadPython() {
-  if (pyReady) return pyReady;
-  pyReady = (async () => {
-    const py = await loadPyodide({ indexURL: PYODIDE_INDEX });
-    await py.loadPackage(['numpy', 'pandas', 'micropip', 'tzdata']);
-    const manifest = await (await fetch('manifest.json', { cache: 'no-store' })).json();
-    py.globals.set('wheel_url', new URL(manifest.wheel, location.href).href);
-    await py.runPythonAsync('import micropip\nawait micropip.install(wheel_url, deps=False)');
-    py.runPython('from alpaca_analyzer.web import build_reports');
-    return py;
+// ------------------------------------------------------------------------------ engine
+// The analysis engine is a Rust program compiled to WebAssembly (engine-<build>.wasm, ~0.5 MB). It has a
+// tiny C-style interface: copy two UTF-8 strings in, call aa_run, read the JSON result back out.
+let engineReady = null;
+function loadEngine() {
+  if (engineReady) return engineReady;
+  engineReady = (async () => {
+    let file = MY_BUILD ? `engine-${MY_BUILD}.wasm` : null;
+    if (!file) file = (await (await fetch('manifest.json', { cache: 'no-store' })).json()).engine;   // local preview
+    const res = await fetch(file);
+    if (!res.ok) {
+      throw new Error(res.status === 404 ? 'A new version of this page was published: reload the page to use it.'
+        : `Could not download the analysis engine (HTTP ${res.status}).`);
+    }
+    return WebAssembly.compile(await res.arrayBuffer());
   })();
-  return pyReady;
+  return engineReady;
+}
+
+async function runEngine(mod, bundleJson, optsJson) {
+  const { exports: x } = await WebAssembly.instantiate(mod, {});   // a fresh instance (and heap) per run
+  const enc = new TextEncoder();
+  const put = (str) => {
+    const b = enc.encode(str);
+    const p = x.aa_alloc(b.length);
+    new Uint8Array(x.memory.buffer, p, b.length).set(b);
+    return [p, b.length];
+  };
+  const read = (p, n) => new TextDecoder().decode(new Uint8Array(x.memory.buffer, p, n));
+  const [bp, bl] = put(bundleJson);
+  const [op, ol] = put(optsJson);
+  try {
+    x.aa_run(bp, bl, op, ol, Date.now(), -new Date().getTimezoneOffset());
+  } catch (e) {   // a panic in the engine aborts the call; it left its message behind
+    const msg = read(x.aa_panic_ptr(), x.aa_panic_len());
+    throw new Error('The analysis engine failed' + (msg ? `: ${msg}` : ` (${e.message})`));
+  }
+  const out = JSON.parse(read(x.aa_out_ptr(), x.aa_out_len()));
+  if (out.error) throw new Error(out.error);
+  return out;
 }
 
 // ------------------------------------------------------------------------------- run
@@ -624,15 +649,15 @@ let refreshing = false;
 let lastMeta = null;
 async function analyze(creds, force = false) {
   const benchmarks = ($('bench').value || 'SPY QQQ').toUpperCase().split(/[\s,]+/).filter(Boolean);
-  const pyLoading = loadPython();   // download Python in parallel with the API calls
+  const engine = loadEngine();   // download the engine in parallel with the API calls
   const { bundle, meta } = await fetchBundle(creds, benchmarks, force);
   lastMeta = meta;
-  step('Starting the analysis engine (first visit downloads ~20 MB, then it\'s cached)…');
-  const py = await pyLoading;
+  step('Starting the analysis engine…');
+  const mod = await engine;
   step(`Rebuilding ${bundle.activities.length} activities into lots, strategies and charts…`);
   await new Promise((r) => setTimeout(r, 30));  // let the progress text paint
   const opts = { benchmarks, start: $('start').value || null };
-  return JSON.parse(py.globals.get('build_reports')(JSON.stringify(bundle), JSON.stringify(opts)));
+  return runEngine(mod, JSON.stringify(bundle), JSON.stringify(opts));
 }
 
 function applyResult(out) {
@@ -845,5 +870,5 @@ if (rec && rec.enc) {
   $('forget').hidden = false;
   $('savedNote').textContent = 'Using keys saved on this device (unencrypted).';
 }
-// Warm the Python runtime while the user fills in the form.
-if ('requestIdleCallback' in window) requestIdleCallback(() => loadPython().catch(() => { pyReady = null; }));
+// Fetch the engine while the user fills in the form.
+if ('requestIdleCallback' in window) requestIdleCallback(() => loadEngine().catch(() => { engineReady = null; }));
