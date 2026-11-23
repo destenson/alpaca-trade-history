@@ -268,9 +268,9 @@ document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('
     return call ? S * N(d1) - K * df * N(d2) : K * df * N(-d2) - S * N(-d1);
   }
   // P&L of a leg set at underlying S (legs: [strike, is_call, qty x100, T, iv])
-  function pnl(m, S, shift) {
+  function pnl(m, S, shift, dt = 0) {
     let y = -m.cost + m.shares * S;
-    for (const [K, c, q, T, iv] of m.legs) y += q * bs(S, K, T, Math.max(iv * (1 + shift), 1e-3), c === 1);
+    for (const [K, c, q, T, iv] of m.legs) y += q * bs(S, K, Math.max(T - dt, 0), Math.max(iv * (1 + shift), 1e-3), c === 1);
     return y;
   }
   const r2 = (v) => Math.round(v * 100) / 100;
@@ -316,6 +316,7 @@ document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('
       if (v.und !== und) continue;
       const spec = FIGS[v.fid];
       spec.data[v.t_open].y = v.x.map((x) => r2(pnl(v.order, x, shift)));
+      for (const [ti, dt] of v.days || []) spec.data[ti].y = v.x.map((x) => r2(pnl(v.order, x, shift, dt)));
       if (v.t_comb !== null && v.pos) spec.data[v.t_comb].y = v.x.map((x) => r2(pnl(v.order, x, shift) + pnl(v.pos, x, shift)));
       const at = pnl(v.order, S, shift);
       if (v.t_mark !== null) { spec.data[v.t_mark].x = [S]; spec.data[v.t_mark].y = [r2(at)]; }

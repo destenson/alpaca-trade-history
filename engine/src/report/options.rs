@@ -516,8 +516,46 @@ impl<'a> Report<'a> {
             if let Some(mp) = &model {
                 data.push(json!({"type": "scatter", "mode": "markers", "name": "Estimated P&L at that price", "x": [jf(spot)], "y": [jr(est_unreal, 2)],
                     "marker": {"color": "var:ink", "size": 9, "symbol": "circle-open", "line": {"width": 2}}, "hovertemplate": "est. P&L %{y:$,.2f}<extra></extra>"}));
+                let (t_open, t_mark) = (data.len() - 2, data.len() - 1);
+                // the estimate at each later trading day's close until the first expiration, fading out
+                let mut days = Vec::new();
+                if let Some(m) = self.market().cloned() {
+                    let first = mp.legs.iter().map(|l| l[3]).fold(f64::INFINITY, f64::min);
+                    let mut ds = Vec::new();
+                    let mut d = util::ny_date(&m.valuation);
+                    for _ in 0..400 {
+                        d += chrono::Duration::days(1);
+                        if !rp::is_trading_day(d) {
+                            continue;
+                        }
+                        let dt = rp::trading_days(&m.valuation, &util::from_ny(d, 16, 0, 0)) / rp::TRADING_DAYS;
+                        if dt >= first - 0.5 / rp::TRADING_DAYS {     // expiration day: the expiration curve
+                            break;
+                        }
+                        ds.push((d, dt));
+                    }
+                    // at most 12 curves: thin out long runs evenly, keeping the last
+                    let step = (ds.len() as f64 / 12.0).ceil().max(1.0) as usize;
+                    let n = ds.len();
+                    let picked: Vec<(NaiveDate, f64)> = ds.into_iter().enumerate().filter(|(k, _)| (n - 1 - k) % step == 0).map(|x| x.1).collect();
+                    let np = picked.len();
+                    for (k, (d, dt)) in picked.into_iter().enumerate() {
+                        let y: Vec<f64> = whole.x.iter().map(|&x| {
+                            let mut v = -mp.cost + mp.shares * x;
+                            for l in &mp.legs {
+                                v += l[2] * rp::bs(x, l[0], (l[3] - dt).max(0.0), l[4].max(1e-3), if l[1] == 1.0 { 'C' } else { 'P' });
+                            }
+                            v
+                        }).collect();
+                        let fade = 0.75 - 0.55 * k as f64 / (np.max(2) - 1) as f64;     // next day 0.75 … last 0.2
+                        days.push(json!([data.len(), jr(dt, 8)]));
+                        data.push(json!({"type": "scatter", "mode": "lines", "name": "Each later trading day's close (est.)", "x": super::jraw(&whole.x), "y": super::jraw(&y),
+                            "line": {"color": NEUTRAL, "width": 1.5, "dash": "dot"}, "opacity": jr(fade, 3), "legendgroup": "days", "showlegend": k == 0,
+                            "hovertemplate": format!("{} close (est.): %{{y:$,.2f}}<extra></extra>", d.format("%a %m/%d"))}));
+                    }
+                }
                 self.rp_views.push(json!({"kind": "pos", "fid": fid, "und": und, "x": super::jraw(&whole.x), "order": mp.to_json(), "pos": Value::Null, "net": 0.0, "um": Value::Null,
-                    "t_open": data.len() - 2, "t_mark": data.len() - 1, "t_comb": Value::Null, "est": format!("est_rd_{}", i), "rows": []}));
+                    "t_open": t_open, "t_mark": t_mark, "t_comb": Value::Null, "est": format!("est_rd_{}", i), "rows": [], "days": days}));
             }
             // open closing orders: the P&L they lock in, and where today's value curve reaches it
             if !self.share {
