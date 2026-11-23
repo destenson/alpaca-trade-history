@@ -707,11 +707,11 @@ async function run(creds) {
 // Re-fetch and re-analyze with the in-memory keys; the current report stays up until the new one is ready.
 async function refresh(force = false) {
   if (!lastCreds || refreshing) return;
-  if (await checkForUpdate()) return;   // the new version re-runs the report itself
-  refreshing = true;
   const btn = $('refresh');
-  btn.disabled = true;
+  btn.disabled = true;                  // immediate feedback, also while checking for a new version
   btn.textContent = 'Refreshing…';
+  if (await checkForUpdate()) { btn.disabled = false; btn.textContent = 'Refresh'; return; }   // the new version re-runs the report itself
+  refreshing = true;
   $('refreshStatus').classList.remove('err');
   stepSink = (t) => { $('refreshStatus').textContent = '· ' + t; };
   try {
