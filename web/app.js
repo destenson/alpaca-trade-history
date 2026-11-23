@@ -714,23 +714,46 @@ async function checkForUpdate() {
 }
 // backup for a tab left open: look for a new version every few minutes (reloads by itself when it can)
 setInterval(() => { if (!$('result').hidden) checkForUpdate(); }, 5 * 60e3);
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && !$('result').hidden) checkForUpdate();
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && !$('result').hidden && !(await checkForUpdate())) autoRefresh();
 });
 // switching back from another window (not another tab) only fires focus
 let lastFocusCheck = 0;
 window.addEventListener('focus', () => {
   if ($('result').hidden || Date.now() - lastFocusCheck < 30e3) return;
   lastFocusCheck = Date.now();
-  checkForUpdate();
+  checkForUpdate().then((upd) => { if (!upd) autoRefresh(); });
 });
 let refreshing = false;
+
+// Keep the report current without a manual Refresh: on switching report tabs or coming back to the
+// page, re-check orders, positions and quotes (at most every 30 s) and redraw only if something changed.
+// Skipped while the order popup is open or the re-pricing inputs hold edits (a redraw would drop them).
+let lastAutoAt = 0, rpEdited = false;
+function autoRefresh() {
+  if (!lastCreds || refreshing || $('result').hidden || $('ordDlg').open || rpEdited) return;
+  if (Date.now() - lastAutoAt < 30e3) return;
+  refresh(false, true);
+}
 
 let lastMeta = null;
 let lastOrders = [];
 let lastPositions = [];
 let lastCancelled = [];    // option limit orders cancelled in the last day and not placed again (Re-place)       // open orders as Alpaca returned them, for the change-price popup
-async function analyze(creds, force = false) {
+// What a report is built from that changes during the day: open orders, positions and their marks,
+// quotes and stock prints. Equal signatures mean re-running the engine would draw the same report.
+function bundleSig(b) {
+  const q = (s) => [s?.latestQuote?.bp, s?.latestQuote?.ap, s?.latestTrade?.p, s?.impliedVolatility];
+  return JSON.stringify([
+    (b.orders || []).map((o) => [o.id, o.status, o.limit_price, o.stop_price, o.qty, o.filled_qty]),
+    (b.positions || []).map((p) => [p.symbol, p.qty, p.current_price]),
+    Object.entries(b.option_snapshots || {}).map(([k, v]) => [k, q(v)]),
+    Object.entries(b.stock_snapshots || {}).map(([f, book]) => [f, Object.entries(book || {}).map(([k, v]) => [k, v?.latestTrade?.p, v?.dailyBar?.c])]),
+    b.prices, (b.activities || []).length, b.clock?.is_open,
+  ]);
+}
+let lastSig = null;
+async function analyze(creds, force = false, onlyIfChanged = false) {
   const benchmarks = ($('bench').value || 'SPY QQQ').toUpperCase().split(/[\s,]+/).filter(Boolean);
   const engine = loadEngine();   // download the engine in parallel with the API calls
   const { bundle, meta } = await fetchBundle(creds, benchmarks, force);
@@ -738,6 +761,9 @@ async function analyze(creds, force = false) {
   lastOrders = bundle.orders || [];
   lastPositions = bundle.positions || [];
   lastCancelled = await recentCancels(new Alpaca(creds), lastOrders);
+  const sig = bundleSig(bundle);
+  if (onlyIfChanged && sig === lastSig) return null;      // nothing new: keep the report as it is
+  lastSig = sig;
   step('Starting the analysis engine…');
   const mod = await engine;
   step(`Rebuilding ${bundle.activities.length} activities into lots, strategies and charts…`);
@@ -774,6 +800,7 @@ async function run(creds) {
   currentStep = null;
   try {
     const out = await analyze(creds);
+    lastAutoAt = Date.now();
     step('Done.');
     currentStep.classList.replace('active', 'done');
     applyResult(out);
@@ -792,8 +819,9 @@ async function run(creds) {
 }
 
 // Re-fetch and re-analyze with the in-memory keys; the current report stays up until the new one is ready.
-async function refresh(force = false) {
+async function refresh(force = false, auto = false) {
   if (!lastCreds || refreshing) return;
+  lastAutoAt = Date.now();
   const btn = $('refresh');
   btn.disabled = true;                  // immediate feedback, also while checking for a new version
   btn.textContent = 'Refreshing…';
@@ -802,8 +830,9 @@ async function refresh(force = false) {
   $('refreshStatus').classList.remove('err');
   stepSink = (t) => { $('refreshStatus').textContent = '· ' + t; };
   try {
-    applyResult(await analyze(lastCreds, force));
-    $('refreshStatus').textContent = '';
+    const out = await analyze(lastCreds, force, auto);
+    if (out) applyResult(out);
+    $('refreshStatus').textContent = auto && out ? '· Updated: orders or quotes changed' : '';
   } catch (e) {
     console.error(e);
     $('refreshStatus').textContent = '· Refresh failed: ' + (e.message || String(e)) + ' Showing the previous report.';
@@ -876,7 +905,12 @@ window.addEventListener('message', (e) => {
     if (e.data.on) ids.add(e.data.id); else ids.delete(e.data.id);
     try { localStorage.setItem(LOG_STORE, JSON.stringify([...ids])); } catch (_) { /* storage unavailable */ }
   }
-  if (e.data.type === 'aa-tab' && typeof e.data.tab === 'string' && /^[a-z]{1,30}$/.test(e.data.tab)) currentTab = e.data.tab;
+  if (e.data.type === 'aa-tab' && typeof e.data.tab === 'string' && /^[a-z]{1,30}$/.test(e.data.tab)) {
+    const switched = currentTab !== e.data.tab;
+    currentTab = e.data.tab;
+    rpEdited = e.data.edited === true;
+    if (switched) autoRefresh();
+  }
   if (e.data.type === 'aa-theme' && (e.data.theme === 'light' || e.data.theme === 'dark')) setTheme(e.data.theme);
   if (e.data.type === 'aa-tv') showChart(e.data);
   if (e.data.type === 'aa-edit-order') openOrderDialog(e.data);

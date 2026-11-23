@@ -202,7 +202,8 @@ function show(id) {
   secs.forEach(s => s.classList.toggle('on', s.id === id));
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.dataset.tab === id));
   try { localStorage.setItem('aa-tab', id); } catch (e) {}
-  if (window.parent !== window) parent.postMessage({ type: 'aa-tab', tab: id }, '*');
+  // the host may refresh on a tab switch: not while re-pricing inputs hold the reader's own edits
+  if (window.parent !== window) parent.postMessage({ type: 'aa-tab', tab: id, edited: !!document.querySelector('.rp-table tr.edited') }, '*');
   requestAnimationFrame(drawVisible);
 }
 document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', e => {
