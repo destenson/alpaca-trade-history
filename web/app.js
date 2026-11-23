@@ -396,14 +396,20 @@ function mergeHistory(old, fresh) {
   }
   return out;
 }
+// Merge freshly downloaded bars (which overlap the cached ones by a few days). Returns the symbols whose
+// overlapping closes disagree with the cached copy: their adjusted history was rewritten (a split or a
+// dividend), so the cached older bars are on the wrong scale and the full history must be re-downloaded.
 function mergeBars(old, fresh) {
   const out = { ...old };
+  const rescaled = [];
   for (const [sym, bars] of Object.entries(fresh)) {
     if (!bars.length) continue;
+    const prev = new Map((old[sym] || []).map((b) => [b.t, b.c]));
+    if (bars.some((b) => prev.has(b.t) && Math.abs(b.c / prev.get(b.t) - 1) > 0.005)) rescaled.push(sym);
     const cut = bars[0].t;
     out[sym] = [...(old[sym] || []).filter((b) => b.t < cut), ...bars];
   }
-  return out;
+  return { bars: out, rescaled };
 }
 
 async function fetchSnapshots(api, positions, orders, unds, bars, prev) {
@@ -534,8 +540,11 @@ async function fetchBundle(creds, benchmarks, force = false) {
     step(`Updating daily prices (${inc.length} symbols${full.length ? `, ${full.length} in full` : ''})…`);
     const lastDay = inc.map((s) => cache.bars[s]?.at(-1)?.t).filter(Boolean).sort()[0];
     const incStart = lastDay ? new Date(Date.parse(lastDay) - 5 * 864e5).toISOString().slice(0, 10) + 'T00:00:00Z' : barStart;
-    bars = mergeBars(cache.bars, inc.length ? await api.dailyBars(inc, incStart) : {});
-    if (full.length) bars = { ...bars, ...await api.dailyBars(full, barStart) };
+    const merged = mergeBars(cache.bars, inc.length ? await api.dailyBars(inc, incStart) : {});
+    bars = merged.bars;
+    const redo = [...new Set([...full, ...merged.rescaled])];
+    if (merged.rescaled.length) note(`(re-adjusted history: ${merged.rescaled.join(', ')})`);
+    if (redo.length) bars = { ...bars, ...await api.dailyBars(redo, barStart) };
     barsFullAt = cache.barsFullAt;
   }
   step('Downloading open orders…');
