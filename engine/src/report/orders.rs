@@ -201,14 +201,14 @@ impl<'a> Report<'a> {
             if !pops.is_empty() {
                 data.push(json!({"type": "scatter", "mode": "markers", "y": ys, "xaxis": "x2", "name": "Prob. of profit",
                     "x": priced.iter().map(|&i| opening[i].pop.map(jf).unwrap_or(Value::Null)).collect::<Vec<_>>(),
-                    "marker": {"color": "var:ink", "symbol": "diamond", "size": 9}, "customdata": cd, "hovertemplate": ht}));
+                    "marker": {"color": "var:series-4", "symbol": "diamond", "size": 10}, "customdata": cd, "hovertemplate": ht}));
             }
             if any_fill {
                 let pf = |g: &dyn Fn(&crate::fillodds::FillOdds) -> f64| priced.iter().map(|&i| opening[i].fill.as_ref().map(|f| jf(g(f))).unwrap_or(Value::Null)).collect::<Vec<_>>();
                 data.push(json!({"type": "scatter", "mode": "markers", "y": ys, "xaxis": "x2", "name": "Chance of filling", "x": pf(&|f| f.p_fill),
-                    "marker": {"color": "var:ink", "symbol": "circle-open", "size": 10, "line": {"width": 2}}, "customdata": cd, "hovertemplate": ht}));
-                data.push(json!({"type": "scatter", "mode": "markers", "y": ys, "xaxis": "x2", "name": "Fill and profit", "x": pf(&|f| f.fill_and_profit),
-                    "marker": {"color": "var:ink", "symbol": "x-thin-open", "size": 9, "line": {"width": 2}}, "customdata": cd, "hovertemplate": ht}));
+                    "marker": {"color": "var:series-3", "symbol": "circle-open", "size": 11, "line": {"width": 2.5, "color": "var:series-3"}}, "customdata": cd, "hovertemplate": ht}));
+                data.push(json!({"type": "scatter", "mode": "markers", "y": ys, "xaxis": "x2", "name": "Fills and ends in profit", "x": pf(&|f| f.fill_and_profit),
+                    "marker": {"color": "var:series-7", "symbol": "x-thin-open", "size": 10, "line": {"width": 2.5, "color": "var:series-7"}}, "customdata": cd, "hovertemplate": ht}));
             }
             parts.push(self.fig("f_ord_rr", data, json!({"barmode": "relative", "margin": {"l": 230, "t": 36}, "yaxis": {"autorange": "reversed"},
                 "xaxis": {"tickprefix": "$", "title": {"text": "max loss ← at expiration → max profit"}},
