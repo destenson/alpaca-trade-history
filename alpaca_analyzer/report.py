@@ -117,11 +117,14 @@ class Report:
                 v = r[c]
                 f = fmt.get(c)
                 txt = f(v) if f else ("–" if v is None or (isinstance(v, float) and math.isnan(v)) else str(v))
-                txt = _cell_money(txt)
+                txt, sign = _unsign(txt)
                 raw = v if isinstance(v, (int, float, np.integer, np.floating)) and not (isinstance(v, float) and math.isnan(v)) else txt
                 cls = ""
                 if c in pnl_cols and isinstance(v, (int, float, np.floating)) and not math.isnan(v):
                     cls = ' class="pos"' if v > 0 else ' class="neg"' if v < 0 else ""
+                if sign:   # sign shown by color only; cost columns are colored by cash direction (received = +)
+                    neg = (sign == "−") != (c in _CASH_OUT_COLS)
+                    cls = ' class="neg"' if neg else ' class="pos"'
                 tds.append(f'<td data-v="{html.escape(str(raw))}"{cls}>{html.escape(txt)}</td>')
             body.append("<tr>" + "".join(tds) + "</tr>")
         return (f'<div class="tablewrap"><table class="sortable" id="{tid}"><thead><tr>{th}</tr></thead>'
@@ -778,7 +781,7 @@ class Report:
         show["open_time"] = show["open_time"].map(_iso)
         show.columns = ["Opened", "Underlying", "Strategy", "Legs", "DTE", "Net premium", "Max risk", "Outcome",
                         "Days", "P&L", "Return on risk"]
-        sub = ("Net premium: + credit received / − debit paid, fees included. Open positions include unrealized P&L.")
+        sub = ("Net premium: blue = credit received, red = debit paid, fees included. Open positions include unrealized P&L.")
         if self.share:
             show = show.drop(columns=["Net premium", "Max risk", "P&L"])
             sub = "Return on risk = P&L ÷ max risk at entry. Per-position dollar amounts are omitted in the shared view."
@@ -828,7 +831,7 @@ class Report:
                 "the day it closed; whenever the pot covers a share, whole shares are bought at that day's close and "
                 "the rest stays in the pot (<b>Cash left</b>). Losing positions are ignored. <b>(L)</b> columns count "
                 "losses too: they come out of the same pot, so they have to be earned back before more shares are "
-                "bought (shares already bought are kept; negative cash = losses still to recover). "
+                "bought (shares already bought are kept; red cash = losses still to recover). "
                 "<b>Vs. plan</b> compares with all the shares you hold now, however you bought them.")
         if unpriced:
             note += f" {unpriced} closing day(s) had no price history, so no shares were bought then."
@@ -1139,8 +1142,8 @@ class Report:
         parts.append('<figure class="card wide"><h3>Open option strategy orders</h3><p class="sub">Net price per '
                      'spread: debit you pay or credit you receive. Mid/natural are the last quotes (stale while the '
                      f'market is closed); <b>Est.</b> is the model value at {when} from the re-pricing inputs above. '
-                     '<b>Edge</b> = dollars your limit is better than the mid / estimate (positive: a better price, but '
-                     'less likely to fill; negative: you are paying up).</p>'
+                     '<b>Edge</b> = dollars your limit is better than the mid / estimate (blue: a better price, but '
+                     'less likely to fill; red: you are paying up).</p>'
                      + self.table(pd.DataFrame(rows), {
                          "DTE": lambda v: num(v, 0), "Edge vs mid": lambda v: money(v, True),
                          "Edge vs est.": lambda v: money(v, True), "Max profit": _lim,
@@ -1448,12 +1451,18 @@ def _nice_bins(s: pd.Series, target: int = 24):
     return edges if len(edges) > 1 else np.array([lo - 1, hi + 1])
 
 
-_SIGNED_MONEY = re.compile(r"^([+−])\$(\d)")
+_SIGNED = re.compile(r"^([+−-])(\$\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?%)$")
+_CASH_OUT_COLS = {"Cost", "Cost basis"}   # positive = cash paid out, so it's colored like a loss
 
 
-def _cell_money(txt: str) -> str:
-    """Table cells: '+$252.41' -> '$ +252.41' so the $ and the sign line up down a column."""
-    return _SIGNED_MONEY.sub(r"$ \1\2", txt) if isinstance(txt, str) else txt
+def _unsign(txt):
+    """Table cells: '+$252.41' / '−12.5%' -> ('$252.41' / '12.5%', sign); the cell's color shows the sign."""
+    if not isinstance(txt, str):
+        return txt, ""
+    m = _SIGNED.match(txt)
+    if not m:
+        return txt, ""
+    return m.group(2).replace("$ ", "$"), "−" if m.group(1) in "−-" else "+"
 
 
 def _tip_attr(label: str) -> str:
