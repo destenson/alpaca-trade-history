@@ -73,6 +73,8 @@ th.asc::after { content: " â–²"; font-size: 9px; } th.desc::after { content: " â
 td { padding: 6px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 tr:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
 td.pos { color: var(--gain-text); } td.neg { color: var(--loss-text); }
+/* "$" in tables: lighter and spaced so it is not misread as a 5 */
+td .cur { color: var(--muted); margin-right: 0.18em; font-weight: 400; }
 .prose ul { margin: 4px 0; padding-left: 20px; } .prose li { margin: 6px 0; color: var(--ink-2); }
 .prose b { color: var(--ink); }
 .empty { color: var(--muted); }
@@ -248,7 +250,8 @@ document.querySelectorAll('select.interp').forEach(sel => sel.addEventListener('
     const row = [...table.tBodies[0].rows].find((r) => r.cells[0].dataset.v === String(k));
     if (!row) return;
     const td = row.cells[ci];
-    td.textContent = text; td.dataset.v = String(v);
+    td.innerHTML = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\$/g, () => '<span class="cur">$</span>');
+    td.dataset.v = String(v);
     if (pn) { td.classList.toggle('pos', v > 0); td.classList.toggle('neg', v < 0); }
   }
   function update(tr, rowOnly) {

@@ -178,6 +178,11 @@ pub fn unsign(txt: &str) -> (String, Option<char>) {
     (rest.replace("$ ", "$"), Some(if first == '+' { '+' } else { '−' }))
 }
 
+/// Table cells: the $ is set in a lighter color with a small gap so it isn't misread as a 5.
+pub fn cur(escaped: &str) -> String {
+    escaped.replace('$', "<span class=\"cur\">$</span>")
+}
+
 pub fn tip_attr(label: &str) -> String {
     match tip(label) {
         Some(t) => format!(" data-tip=\"{}\" tabindex=\"0\"", esc(t)),
@@ -228,7 +233,7 @@ pub fn table(t: &Tbl, tid: &str, pnl_cols: &[&str]) -> String {
                 let neg = (sg == '−') != CASH_OUT_COLS.contains(&c.as_str());
                 cls = if neg { " class=\"neg\"" } else { " class=\"pos\"" };
             }
-            body.push_str(&format!("<td data-v=\"{}\"{}>{}</td>", esc(&raw), cls, esc(&txt)));
+            body.push_str(&format!("<td data-v=\"{}\"{}>{}</td>", esc(&raw), cls, cur(&esc(&txt))));
         }
         body.push_str("</tr>");
     }
