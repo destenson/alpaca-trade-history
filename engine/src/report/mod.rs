@@ -94,14 +94,17 @@ pub struct Tbl<'a> {
     pub cols: Vec<String>,
     pub rows: Vec<Vec<Cell>>,
     pub fmt: Vec<(String, FmtFn<'a>)>,
+    /// Collapsible groups, parallel to ``rows`` (empty = none): (group key, is the group's summary row).
+    /// The summary row shows with an expand button; the group's other rows stay hidden until expanded.
+    pub groups: Vec<Option<(String, bool)>>,
 }
 
 impl<'a> Tbl<'a> {
     pub fn new(cols: &[&str]) -> Tbl<'a> {
-        Tbl { cols: cols.iter().map(|c| c.to_string()).collect(), rows: vec![], fmt: vec![] }
+        Tbl { cols: cols.iter().map(|c| c.to_string()).collect(), rows: vec![], fmt: vec![], groups: vec![] }
     }
     pub fn with_cols(cols: Vec<String>) -> Tbl<'a> {
-        Tbl { cols, rows: vec![], fmt: vec![] }
+        Tbl { cols, rows: vec![], fmt: vec![], groups: vec![] }
     }
     pub fn f(mut self, col: &str, f: impl Fn(&Cell) -> String + 'a) -> Self {
         self.fmt.push((col.to_string(), Box::new(f)));
@@ -109,6 +112,15 @@ impl<'a> Tbl<'a> {
     }
     pub fn push(&mut self, row: Vec<Cell>) {
         self.rows.push(row);
+        if !self.groups.is_empty() {
+            self.groups.push(None);
+        }
+    }
+    /// A row of a collapsible group; push the summary row first.
+    pub fn push_grouped(&mut self, row: Vec<Cell>, key: &str, summary: bool) {
+        self.groups.resize(self.rows.len(), None);
+        self.rows.push(row);
+        self.groups.push(Some((key.to_string(), summary)));
     }
     pub fn drop_cols(&mut self, drop: &[&str]) {
         let keep: Vec<usize> = (0..self.cols.len()).filter(|&i| !drop.contains(&self.cols[i].as_str())).collect();
@@ -251,9 +263,29 @@ pub fn table(t: &Tbl, tid: &str, pnl_cols: &[&str]) -> String {
     }
     let th: String = t.cols.iter().enumerate().map(|(i, c)| format!("<th data-k=\"{}\"{}>{}</th>", i, tip_attr(c), esc(c))).collect();
     let mut body = String::new();
-    for r in &t.rows {
-        body.push_str("<tr>");
-        for (c, v) in t.cols.iter().zip(r) {
+    let mut gid: Vec<String> = Vec::new();
+    for (ri, r) in t.rows.iter().enumerate() {
+        let grp = t.groups.get(ri).cloned().flatten();
+        let mut toggle = String::new();
+        match &grp {
+            Some((key, summary)) => {
+                let n = match gid.iter().position(|k| k == key) {
+                    Some(n) => n,
+                    None => {
+                        gid.push(key.clone());
+                        gid.len() - 1
+                    }
+                };
+                if *summary {
+                    body.push_str(&format!("<tr class=\"grp-sum\" data-grp=\"{}-{}\">", tid, n));
+                    toggle = format!("<button type=\"button\" class=\"grp-tog\" aria-expanded=\"false\" aria-label=\"Show the rows of {}\" title=\"Show the rows behind this total\">▸</button>", esc(key));
+                } else {
+                    body.push_str(&format!("<tr class=\"grp-row\" data-grp=\"{}-{}\" hidden>", tid, n));
+                }
+            }
+            None => body.push_str("<tr>"),
+        }
+        for (ci, (c, v)) in t.cols.iter().zip(r).enumerate() {
             let f = t.fmt.iter().find(|(k, _)| k == c).map(|(_, f)| f);
             let txt = match f {
                 Some(f) => f(v),
@@ -289,6 +321,7 @@ pub fn table(t: &Tbl, tid: &str, pnl_cols: &[&str]) -> String {
                 cls = if neg { " class=\"neg\"" } else { " class=\"pos\"" };
             }
             let html = if TICKER_COLS.contains(&c.as_str()) { ticker(&txt) } else { cur(&esc(&txt)) };
+            let html = if ci == 0 { format!("{}{}", std::mem::take(&mut toggle), html) } else { html };
             body.push_str(&format!("<td data-v=\"{}\"{}>{}</td>", esc(&raw), cls, html));
         }
         body.push_str("</tr>");

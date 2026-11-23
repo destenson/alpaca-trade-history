@@ -73,6 +73,16 @@ th.asc::after { content: " ▲"; font-size: 9px; } th.desc::after { content: " �
 td { padding: 6px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 tr:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
 td.pos { color: var(--gain-text); } td.neg { color: var(--loss-text); }
+/* collapsible table groups */
+tr.grp-sum td { font-weight: 600; }
+tr.grp-row td { background: var(--page); }
+tr.grp-row td:first-child { padding-left: 2em; }
+.grp-tog { border: 0; background: none; color: var(--muted); cursor: pointer; font: inherit; font-size: 11px;
+  width: 1.4em; padding: 0; margin-right: 0.25em; }
+.grp-tog:hover, .grp-tog:focus-visible { color: var(--ink); }
+.grp-all { display: block; margin: 0 0 6px auto; border: 0; background: none; padding: 0; cursor: pointer;
+  font: inherit; font-size: 12px; color: var(--series-1); }
+.grp-all:hover { text-decoration: underline; }
 /* "$" in tables: lighter and spaced so it is not misread as a 5 */
 td .cur { color: var(--muted); margin-right: 0.18em; font-weight: 400; }
 .prose ul { margin: 4px 0; padding-left: 20px; } .prose li { margin: 6px 0; color: var(--ink-2); }
@@ -573,7 +583,8 @@ document.addEventListener('click', (e) => {
   const t = document.getElementById(a.getAttribute('href').slice(1));
   if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
 });
-// sortable tables
+// sortable tables. In tables with collapsible groups, totals (and ungrouped rows) are sorted, and each
+// group's rows are sorted among themselves and stay right under their total.
 document.querySelectorAll('table.sortable').forEach(t => {
   t.querySelectorAll('th').forEach((th, i) => th.addEventListener('click', () => {
     const asc = !th.classList.contains('asc');
@@ -581,11 +592,44 @@ document.querySelectorAll('table.sortable').forEach(t => {
     th.classList.add(asc ? 'asc' : 'desc');
     const rows = Array.from(t.tBodies[0].rows);
     const val = r => { const v = r.cells[i].dataset.v; const n = parseFloat(v); return isNaN(n) || !/^-?[\d.e+-]+$/.test(v) ? v : n; };
-    rows.sort((a, b) => { const x = val(a), y = val(b);
+    const cmp = (a, b) => { const x = val(a), y = val(b);
       const c = (typeof x === 'number' && typeof y === 'number') ? x - y : String(x).localeCompare(String(y));
-      return asc ? c : -c; });
-    rows.forEach(r => t.tBodies[0].appendChild(r));
+      return asc ? c : -c; };
+    const top = rows.filter(r => !r.classList.contains('grp-row')).sort(cmp);
+    top.forEach(r => {
+      t.tBodies[0].appendChild(r);
+      if (r.classList.contains('grp-sum')) {
+        rows.filter(d => d.classList.contains('grp-row') && d.dataset.grp === r.dataset.grp).sort(cmp)
+          .forEach(d => t.tBodies[0].appendChild(d));
+      }
+    });
   }));
+});
+// collapsible groups: ▸ on a total row shows the rows behind it; "Expand all" above the table
+function setGroup(t, sum, open) {
+  const b = sum.querySelector('.grp-tog');
+  b.setAttribute('aria-expanded', String(open)); b.textContent = open ? '▾' : '▸';
+  b.title = open ? 'Hide the rows behind this total' : 'Show the rows behind this total';
+  sum.classList.toggle('open', open);
+  t.querySelectorAll(`tr.grp-row[data-grp="${sum.dataset.grp}"]`).forEach(r => { r.hidden = !open; });
+}
+document.querySelectorAll('table.sortable').forEach(t => {
+  const sums = [...t.querySelectorAll('tr.grp-sum')];
+  if (!sums.length) return;
+  const all = document.createElement('button');
+  all.type = 'button'; all.className = 'grp-all'; all.textContent = 'Expand all';
+  all.addEventListener('click', () => {
+    const open = all.textContent === 'Expand all';
+    sums.forEach(s => setGroup(t, s, open));
+    all.textContent = open ? 'Collapse all' : 'Expand all';
+  });
+  t.closest('.tablewrap').before(all);
+  t.addEventListener('click', (e) => {
+    const b = e.target.closest('.grp-tog');
+    if (!b) return;
+    const sum = b.closest('tr');
+    setGroup(t, sum, b.getAttribute('aria-expanded') !== 'true');
+  });
 });
 try { const th = localStorage.getItem('aa-theme'); if (th) document.documentElement.dataset.theme = th; } catch (e) {}
 if (EMBEDDED) parent.postMessage({ type: 'aa-ready' }, '*');

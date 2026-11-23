@@ -357,7 +357,7 @@ impl<'a> Report<'a> {
             for (und, v) in tot {
                 greek_rows.push(GRow { und, contract: "TOTAL".into(), qty: f64::NAN, iv: None, d: v[0], g: v[1], t: v[2], v: v[3] });
             }
-            greek_rows.sort_by(|x, y| (x.und.clone(), x.contract == "TOTAL", x.contract.clone()).cmp(&(y.und.clone(), y.contract == "TOTAL", y.contract.clone())));
+            greek_rows.sort_by(|x, y| (x.und.clone(), x.contract != "TOTAL", x.contract.clone()).cmp(&(y.und.clone(), y.contract != "TOTAL", y.contract.clone())));
             let mut tb = Tbl::new(&["Underlying", "Contract", "Qty", "IV", "Δ shares", "Γ", "Θ $/day", "Vega $/vol-pt"])
                 .f("Qty", |c| if c.f().is_nan() { String::new() } else { util::g(c.f()) })
                 .f("IV", |c| if c.f().is_nan() { String::new() } else { pct(c.f(), false, 0) })
@@ -365,11 +365,20 @@ impl<'a> Report<'a> {
                 .f("Γ", super::fnum(2))
                 .f("Θ $/day", super::fm(true, 2))
                 .f("Vega $/vol-pt", super::fm(true, 2));
+            // one collapsible group per underlying: the TOTAL row shows, its contracts and shares expand
             for r in &greek_rows {
-                tb.push(vec![Cell::s(&r.und), Cell::s(&r.contract), Cell::F(r.qty), Cell::of(r.iv), Cell::F(r.d), Cell::F(r.g), Cell::F(r.t), Cell::F(r.v)]);
+                let total = r.contract == "TOTAL";
+                let contract = if total {
+                    let n = greek_rows.iter().filter(|x| x.und == r.und && x.contract != "TOTAL" && x.contract != "shares").count();
+                    let sh = greek_rows.iter().any(|x| x.und == r.und && x.contract == "shares");
+                    format!("Total · {} contract{}{}", n, if n == 1 { "" } else { "s" }, if sh { " + shares" } else { "" })
+                } else {
+                    r.contract.clone()
+                };
+                tb.push_grouped(vec![Cell::s(&r.und), Cell::s(contract), Cell::F(r.qty), Cell::of(r.iv), Cell::F(r.d), Cell::F(r.g), Cell::F(r.t), Cell::F(r.v)], &r.und, total);
             }
             html_g = format!(
-                "<figure class=\"card wide\"><h3>Open option Greeks</h3><p class=\"sub\">Position Greeks from Alpaca snapshots. Δ in share-equivalents; Θ is dollars per day; vega is dollars per 1 vol point.</p>{}</figure>",
+                "<figure class=\"card wide\"><h3>Open option Greeks</h3><p class=\"sub\">Position Greeks from Alpaca snapshots, totalled per underlying: ▸ shows the contracts and shares behind a total. Δ in share-equivalents; Θ is dollars per day; vega is dollars per 1 vol point.</p>{}</figure>",
                 table(&tb, "t_greeks", &["Θ $/day"])
             );
         }
