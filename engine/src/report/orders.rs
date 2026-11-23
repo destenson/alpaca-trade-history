@@ -44,6 +44,15 @@ fn strat(o: &PendingOrder) -> Cell {
     Cell::Tip(o.strategy.clone(), format!("No quotes yet: these contracts haven't traded. {}", how))
 }
 
+/// Rough expected profit: chance of filling × chance of profit × max profit (NaN when any is unknown
+/// or the profit is unlimited).
+fn exp_profit(o: &PendingOrder) -> f64 {
+    match (o.fill.as_ref(), o.pop) {
+        (Some(f), Some(p)) if o.max_gain.is_finite() => f.p_fill * p * o.max_gain,
+        _ => f64::NAN,
+    }
+}
+
 fn name(o: &PendingOrder) -> String {
     match o.expiry {
         Some(e) => format!("{} {} {}", o.underlying, o.strategy, e.format("%m/%d")),
@@ -161,8 +170,8 @@ impl<'a> Report<'a> {
                 "<a href=\"#fillodds\" class=\"tilelink\">50%+ chance in the next session: see which</a>".into()),
             ("Expected fills".into(),
                 if any_fill { format!("{:.1}", opening.iter().filter_map(|o| o.fill.as_ref()).map(|f| f.p_fill).sum::<f64>()) } else { "–".into() },
-                if any_fill { format!("of {} · {:.1} expected to fill and end in profit", opening.iter().filter(|o| o.fill.is_some()).count(),
-                    opening.iter().filter_map(|o| o.fill.as_ref()).map(|f| f.fill_and_profit).sum::<f64>()) } else { String::new() }),
+                if any_fill { format!("of {} · expected profit {}", opening.iter().filter(|o| o.fill.is_some()).count(),
+                    money(opening.iter().map(exp_profit).filter(|v| !v.is_nan()).sum::<f64>(), false, 0)) } else { String::new() }),
         ];
         if !stale.is_empty() {
             tiles.insert(1, ("Moved since quotes".into(), stale.len().to_string(),
@@ -190,10 +199,10 @@ impl<'a> Report<'a> {
                     let fp = |v: Option<f64>| v.map(|p| pyfmt_pct(p, 0, false)).unwrap_or_else(|| "–".into());
                     let fill = o.fill.as_ref();
                     json!([o.legs_label(), px(o.net, o.net_is_estimate), fp(o.pop), lim(o.max_gain), super::lim_loss(o.max_loss),
-                           fp(fill.map(|f| f.p_fill)), fp(fill.and_then(|f| f.profit_if_filled)), fp(fill.map(|f| f.fill_and_profit))])
+                           fp(fill.map(|f| f.p_fill)), lim(exp_profit(o))])
                 })
                 .collect();
-            let ht = "<b>%{y}</b><br>%{customdata[0]}<br>limit %{customdata[1]}<br>max profit %{customdata[3]} · max loss %{customdata[4]}<br>prob. of profit %{customdata[2]} now · %{customdata[6]} if filled<br>chance of filling %{customdata[5]} · fill and profit %{customdata[7]}<extra></extra>";
+            let ht = "<b>%{y}</b><br>%{customdata[0]}<br>limit %{customdata[1]}<br>max profit %{customdata[3]} · max loss %{customdata[4]}<br>prob. of profit %{customdata[2]} · chance of filling %{customdata[5]}<br>expected profit %{customdata[6]}<extra></extra>";
             let mut data = vec![
                 json!({"type": "bar", "orientation": "h", "y": ys, "x": gain, "name": "Max profit", "marker": {"color": GAIN}, "customdata": cd, "hovertemplate": ht}),
                 json!({"type": "bar", "orientation": "h", "y": ys, "x": loss, "name": "Max loss", "marker": {"color": LOSS}, "customdata": cd, "hovertemplate": ht}),
@@ -207,15 +216,16 @@ impl<'a> Report<'a> {
                 let pf = |g: &dyn Fn(&crate::fillodds::FillOdds) -> f64| priced.iter().map(|&i| opening[i].fill.as_ref().map(|f| jf(g(f))).unwrap_or(Value::Null)).collect::<Vec<_>>();
                 data.push(json!({"type": "scatter", "mode": "markers", "y": ys, "xaxis": "x2", "name": "Chance of filling", "x": pf(&|f| f.p_fill),
                     "marker": {"color": "var:series-3", "symbol": "circle-open", "size": 11, "line": {"width": 2.5, "color": "var:series-3"}}, "customdata": cd, "hovertemplate": ht}));
-                data.push(json!({"type": "scatter", "mode": "markers", "y": ys, "xaxis": "x2", "name": "Fills and ends in profit", "x": pf(&|f| f.fill_and_profit),
-                    "marker": {"color": "var:series-7", "symbol": "x-thin-open", "size": 10, "line": {"width": 2.5, "color": "var:series-7"}}, "customdata": cd, "hovertemplate": ht}));
+                data.push(json!({"type": "scatter", "mode": "markers", "y": ys, "name": "Expected profit",
+                    "x": priced.iter().map(|&i| exp_profit(&opening[i])).map(|v| if v.is_nan() { Value::Null } else { jr(v, 2) }).collect::<Vec<_>>(),
+                    "marker": {"color": "var:series-7", "symbol": "star", "size": 12, "line": {"width": 1, "color": "var:surface"}}, "customdata": cd, "hovertemplate": ht}));
             }
             parts.push(self.fig("f_ord_rr", data, json!({"barmode": "relative", "margin": {"l": 230, "t": 36}, "yaxis": {"autorange": "reversed"},
                 "xaxis": {"tickprefix": "$", "title": {"text": "max loss ← at expiration → max profit"}},
                 "xaxis2": {"overlaying": "x", "side": "top", "range": [0, 1], "tickformat": ".0%", "showgrid": false, "title": {"text": "chance"}},
                 "legend": {"orientation": "h", "y": -0.12, "yanchor": "top"}, "showlegend": true}),
                 (34 * priced.len() as i64 + 120).max(280), "", "Risk and reward if each order fills",
-                "At your limit price, held to expiration, fees excluded. Undefined-risk sides are left off the bars (see the table). Top axis, market-implied from the legs' implied vol (lognormal, no drift), estimates rather than forecasts: ◆ chance of profit from today's price; ○ chance the order fills (before it expires; this session for DAY orders); ✕ chance it fills <i>and</i> ends in profit. ✕ is usually well below ◆ × ○: a limit better than fair value tends to fill after the price has moved against the trade, so a filled order's odds are worse than today's.", true));
+                "At your limit price, held to expiration, fees excluded. Undefined-risk sides are left off the bars (see the table). Top axis, market-implied estimates rather than forecasts: ◆ chance of profit at expiration (from the legs' implied vol, lognormal, no drift); ○ chance the order fills (before it expires; this session for DAY orders). ★ on the dollar axis: expected profit, a rough guide = chance of filling × chance of profit × max profit.", true));
         }
 
         // ---- tables: what you pay (entry) and what you can make (if filled); a few columns in both
@@ -231,13 +241,13 @@ impl<'a> Report<'a> {
         let mut entry = Tbl::new(&["#", "Underlying", "Strategy", "Legs", "DTE", "Limit", "Mid (quoted)", "Natural", "Edge vs mid", est_col, "Edge vs est.", "TIF", "Placed"])
             .f("Edge vs mid", super::fm(true, 2))
             .f("Edge vs est.", super::fm(true, 2));
-        let mut payoff = Tbl::new(&["#", "Underlying", "Strategy", "Legs", "Expires", "Limit", "Max profit", "Max loss", "Reward/risk", "Breakevens", "Prob. profit", "Fill", "Fill & profit"])
+        let mut payoff = Tbl::new(&["#", "Underlying", "Strategy", "Legs", "Expires", "Limit", "Max profit", "Max loss", "Reward/risk", "Breakevens", "Prob. profit", "Fill", "Exp. profit"])
             .f("Max profit", super::flim())
             .f("Max loss", super::flim_loss())
             .f("Reward/risk", super::fnum(2))
             .f("Prob. profit", super::fp(false, 0))
             .f("Fill", super::fp(false, 0))
-            .f("Fill & profit", super::fp(false, 0));
+            .f("Exp. profit", super::flim());
         for (k, o) in opening.iter().enumerate() {
             let em = match (o.mid_now, o.net) {
                 (Some(m), Some(n)) if !o.net_is_estimate => (m - n) * o.units * o.mult(),
@@ -274,7 +284,7 @@ impl<'a> Report<'a> {
                 Cell::s(if o.breakevens.is_empty() { "–".to_string() } else { dollars_list(&o.breakevens) }),
                 Cell::F(o.pop.unwrap_or(f64::NAN)),
                 Cell::F(o.fill.as_ref().map(|f| f.p_fill).unwrap_or(f64::NAN)),
-                Cell::F(o.fill.as_ref().map(|f| f.fill_and_profit).unwrap_or(f64::NAN)),
+                Cell::F(exp_profit(o)),
             ]);
             payoff.push(r);
         }
@@ -286,7 +296,7 @@ impl<'a> Report<'a> {
             table(&entry, "t_orders", &["Edge vs mid", "Edge vs est."])
         ));
         parts.push(format!(
-            "<figure class=\"card wide\"><h3>If filled: payoff and odds</h3><p class=\"sub\">Each order held to expiration after filling at your limit, fees excluded. <b>Prob. profit</b> is the market-implied chance the underlying finishes past breakeven at the first expiry (lognormal at the legs' IV, no drift). <b>Fill</b> is the chance it fills, from the Chance of filling simulation (before the order expires; this session for DAY orders); <b>Fill &amp; profit</b> is the chance it fills <i>and</i> ends in profit (hover the chart above for the chance of profit once filled). {}{}</p>{}</figure>",
+            "<figure class=\"card wide\"><h3>If filled: payoff and odds</h3><p class=\"sub\">Each order held to expiration after filling at your limit, fees excluded. <b>Prob. profit</b> is the market-implied chance the underlying finishes past breakeven at the first expiry (lognormal at the legs' IV, no drift). <b>Fill</b> is the chance it fills, from the Chance of filling simulation (before the order expires; this session for DAY orders); <b>Exp. profit</b> = Fill × Prob. profit × Max profit, a rough guide. {}{}</p>{}</figure>",
             if opening.iter().any(|o| o.no_market) { "A dotted underline on a strategy means a note: hover it. " } else { "" },
             legs_note,
             table(&payoff, "t_payoff", &[])

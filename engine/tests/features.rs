@@ -165,7 +165,7 @@ fn unquoted_contracts_priced_from_realized_vol() {
     let full = r["full"].as_str().unwrap();
     assert!(full.contains("Estimates use ZS&#x27;s own 139% realized volatility"), "tooltip");
     assert!(!full.contains("no quotes yet</td>"), "fill odds are simulated now");
-    for s in [">Fill</th>", "Fill &amp; profit", "Expected fills"] {
+    for s in [">Fill</th>", ">Exp. profit</th>", "Expected fills"] {
         assert!(full.contains(s), "{s}");
     }
 }
