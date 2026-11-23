@@ -538,11 +538,10 @@ impl<'a> Report<'a> {
                         continue;
                     }
                     seen.push(id);
-                    let x0 = *whole.x.first().unwrap_or(&0.0);
-                    let x1 = *whole.x.last().unwrap_or(&0.0);
                     let price = format!("${:.2} {}", net.abs(), if net < 0.0 { "credit" } else { "debit" });
                     data.push(json!({"type": "scatter", "mode": "lines", "name": format!("Closing order ({}) at {}: {} if filled", what, price, money(pnl, true, 2)),
-                        "x": [jf(x0), jf(x1)], "y": [jr(pnl, 2), jr(pnl, 2)], "line": {"color": "var:series-6", "width": 2, "dash": "dashdot"},
+                        // every x of the chart, so the unified hover lists it wherever you point
+                        "x": super::jraw(&whole.x), "y": whole.x.iter().map(|_| jr(pnl, 2)).collect::<Vec<_>>(), "line": {"color": "var:series-6", "width": 2, "dash": "dashdot"},
                         "hovertemplate": format!("closing order at {}: %{{y:$,.2f}}<extra></extra>", price)}));
                     // crossings of today's value curve with that P&L: roughly where the order would fill now
                     let mut cx = Vec::new();

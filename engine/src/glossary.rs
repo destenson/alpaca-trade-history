@@ -36,7 +36,7 @@ pub fn tip(label: &str) -> Option<&'static str> {
         "Avg cost (eff.)" => "Average cost per share/contract from the FIFO ledger, fees included.",
         "Broker avg" => "Alpaca's average entry price (excludes fees) for comparison.",
         "Cost basis" => "What the open position cost, fees included. Red = paid; blue = credit received (shorts).",
-        "Unrealized" => "Current value minus cost basis: the P&L you'd lock in by closing now at last prices.",
+        "Unrealized" => "Current value minus cost basis, at Alpaca's position marks. On wide option markets those marks can sit near the closing side (bid for longs, ask for shorts), so this can read well below the chart's estimate, which values the legs at the mid.",
         "%" => "Unrealized P&L as a percentage of the cost basis.",
         "Price" => "Last price from Alpaca.",
         "Value" => "Current market value. Red for short positions (what it would cost to buy them back).",
