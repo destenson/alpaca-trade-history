@@ -467,6 +467,19 @@ impl<'a> Report<'a> {
                 None => String::new(),
             }
         );
+        // Alpaca's own marks, when they differ from the quote mids used here
+        {
+            let mid: f64 = g.iter().map(|p| p.market_value).sum();
+            let brk: f64 = g.iter().map(|p| p.broker_value).sum();
+            if mid.is_finite() && brk.is_finite() && (mid - brk).abs() >= 1.0 {
+                let cost: f64 = g.iter().map(|p| p.cost_basis).sum();
+                head.push_str(&format!(
+                    "<br><span class=\"muted\">Values use quote mids. Alpaca's position marks say value {} · unrealized {}: they can sit at the closing side of wide quotes (shorts at the ask, longs at the bid).</span>",
+                    money(brk, true, 2),
+                    money(brk - cost, true, 2)
+                ));
+            }
+        }
         if let Some(mp) = &model {
             head.push_str(&format!(
                 "<br><span class=\"rp-est\" id=\"est_rd_{}\">Estimated at {}: unrealized <b>{}</b> · value {}</span>",

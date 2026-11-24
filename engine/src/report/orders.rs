@@ -801,7 +801,7 @@ impl<'a> Report<'a> {
                 }
             }
             parts.push(format!(
-                "<figure class=\"card wide\"><h3>Open option positions</h3><p class=\"sub\">One row per underlying: ▸ shows its contracts. Prices are per share (× 100 per contract). Click Unrealized to close a contract, or a whole underlying (up to 4 legs), at a chosen profit.</p>{}</figure>",
+                "<figure class=\"card wide\"><h3>Open option positions</h3><p class=\"sub\">One row per underlying: ▸ shows its contracts. Prices are per share (× 100 per contract), at the quote mid: Alpaca’s own marks can sit at the closing side of wide quotes. Click Unrealized to close a contract, or a whole underlying (up to 4 legs), at a chosen profit.</p>{}</figure>",
                 table(&ot, "t_pos_opt", &["Unrealized", "%"])
             ));
         }

@@ -38,6 +38,8 @@ pub struct OpenPos {
     pub price: f64,
     pub broker_avg_price: f64,
     pub market_value: f64,
+    /// Alpaca's own market value (options: often the closing side of the quote, see `open_positions`)
+    pub broker_value: f64,
     pub cost_basis: f64,
     pub unrealized_pl: f64,
     pub unrealized_pct: f64,
@@ -280,8 +282,20 @@ fn open_positions(b: &Bundle, ledger: &Ledger, marks: &HashMap<String, f64>) -> 
             let c = parse_occ(&sym);
             let qty = jv::f0(p, "qty");
             let mult = if c.is_some() { 100.0 } else { 1.0 };
-            let px = jv::f(p, "current_price").unwrap_or(NAN);
-            let mv = jv::f(p, "market_value").unwrap_or(NAN);
+            // Options are valued at the quote mid: Alpaca's own marks can sit at the closing side of a wide
+            // quote (short legs at the ask, long legs at the bid), which can price a spread below what it
+            // can possibly be worth. Its figure is kept as `broker_value`.
+            let broker_mv = jv::f(p, "market_value").unwrap_or(NAN);
+            let mid = c.as_ref().and_then(|_| {
+                let q = b.option_snapshots.get(&sym)?.get("latestQuote")?;
+                let (bp, ap) = (jv::f(q, "bp").filter(|x| *x > 0.0)?, jv::f(q, "ap").filter(|x| *x > 0.0)?);
+                (ap >= bp).then_some((bp + ap) / 2.0)
+            });
+            let px = mid.or_else(|| jv::f(p, "current_price")).unwrap_or(NAN);
+            let mv = match mid {
+                Some(m) => qty * m * mult,
+                None => broker_mv,
+            };
             let broker_cost = jv::f(p, "cost_basis").filter(|x| *x != 0.0).unwrap_or(0.0);
             let lots = ledger.open_lots.get(&sym);
             let cost = match lots {
@@ -297,6 +311,7 @@ fn open_positions(b: &Bundle, ledger: &Ledger, marks: &HashMap<String, f64>) -> 
                 price: px,
                 broker_avg_price: jv::f(p, "avg_entry_price").filter(|x| *x != 0.0).unwrap_or(NAN),
                 market_value: mv,
+                broker_value: broker_mv,
                 cost_basis: cost,
                 unrealized_pl: upl,
                 unrealized_pct: if cost != 0.0 { upl / cost.abs() } else { NAN },
@@ -322,6 +337,7 @@ fn open_positions(b: &Bundle, ledger: &Ledger, marks: &HashMap<String, f64>) -> 
                 price: px,
                 broker_avg_price: NAN,
                 market_value: mv,
+                broker_value: mv,
                 cost_basis: cost,
                 unrealized_pl: mv - cost,
                 unrealized_pct: if cost != 0.0 { (mv - cost) / cost.abs() } else { NAN },

@@ -220,7 +220,7 @@ pub fn evaluate(units: &[&Unit], strategy: &str, spot: f64, today: NaiveDate, xs
         breakevens: risk.breakevens,
         zones: risk.zones,
         cost: units.iter().map(|u| u.cost).sum(),
-        value: units.iter().map(|u| u.value).sum(),
+        value: bounded_value(units, max_gain, max_loss),
         greeks,
         curve_x: shown.x,
         curve_expiry: shown.expiry,
@@ -407,4 +407,19 @@ pub fn build_units(rows: &[OptRow], shares: f64, share_cost: f64, share_value: f
     let rest = shares - 100.0 * lots as f64 * sign;
     let odd = if rest.abs() > 1e-9 { Some(stock(rest)) } else { None };
     (units, odd, split)
+}
+
+/// A group's market value, kept within what its legs can be worth: between its worst and best case at
+/// expiration (for legs that all expire together; calendars and stock-only groups aren't bounded).
+/// Marks on wide quotes can otherwise price e.g. a long put spread below zero.
+fn bounded_value(units: &[&Unit], max_gain: f64, max_loss: f64) -> f64 {
+    let v: f64 = units.iter().map(|u| u.value).sum();
+    let cost: f64 = units.iter().map(|u| u.cost).sum();
+    let exps: std::collections::BTreeSet<_> = units.iter().filter_map(|u| parse_occ(&u.symbol).map(|c| c.expiry)).collect();
+    if exps.len() != 1 || v.is_nan() {
+        return v;
+    }
+    let lo = if max_loss.is_finite() { max_loss + cost } else { f64::NEG_INFINITY };
+    let hi = if max_gain.is_finite() { max_gain + cost } else { f64::INFINITY };
+    if lo <= hi { v.clamp(lo, hi) } else { v }
 }
