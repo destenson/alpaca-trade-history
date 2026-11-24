@@ -489,6 +489,15 @@ pub fn when(m: &Market) -> String {
     format!("the next open ({} {}, {} ET)", v.format("%a %b"), chrono::Datelike::day(&v), util::clock(&v))
 }
 
+/// Breakevens for a table cell: up to 4 listed; more read "6 breakevens · $6.01 … $7.12", all in a tooltip.
+pub fn be_cell(v: &[f64]) -> Cell {
+    match v.len() {
+        0 => Cell::s("–"),
+        1..=4 => Cell::s(dollars_list(v)),
+        n => Cell::Tip(format!("{} breakevens · ${} … ${}", n, util::commas(v[0], 2), util::commas(v[n - 1], 2)), format!("Breakevens: {}", dollars_list(v))),
+    }
+}
+
 pub fn dollars_list(v: &[f64]) -> String {
     v.iter().map(|b| format!("${}", util::commas(*b, 2))).collect::<Vec<_>>().join(", ")
 }

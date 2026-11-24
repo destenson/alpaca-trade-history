@@ -460,7 +460,11 @@ impl<'a> Report<'a> {
             "Whole position: max gain {} · max loss {} · breakevens {} · unrealized {}{}",
             lim(whole.max_gain),
             super::lim_loss(whole.max_loss),
-            if whole.breakevens.is_empty() { "none".to_string() } else { dollars_list(&whole.breakevens) },
+            match whole.breakevens.len() {
+                0 => "none".to_string(),
+                1..=4 => dollars_list(&whole.breakevens),
+                n => format!("{} (${} … ${})", n, util::commas(whole.breakevens[0], 2), util::commas(whole.breakevens[n - 1], 2)),
+            },
             money(whole.unrealized, true, 2),
             match whole.greeks.theta.filter(|t| *t != 0.0) {
                 Some(t) => format!(" · Δ {} sh · Θ {}/day", num(whole.greeks.delta.unwrap_or(0.0), 1), money(t, true, 2)),
@@ -641,7 +645,7 @@ impl<'a> Report<'a> {
                     },
                     Cell::F(grp.max_gain),
                     Cell::F(grp.max_loss),
-                    Cell::s(if grp.breakevens.is_empty() { "–".to_string() } else { dollars_list(&grp.breakevens) }),
+                    super::be_cell(&grp.breakevens),
                     Cell::F(grp.greeks.delta.unwrap_or(f64::NAN)),
                     Cell::F(grp.greeks.theta.unwrap_or(f64::NAN)),
                 ]);

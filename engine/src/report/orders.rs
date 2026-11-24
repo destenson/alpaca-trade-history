@@ -149,10 +149,10 @@ fn fill_text(est_unit: Option<f64>, net: f64) -> String {
 }
 
 fn bes(v: &[f64]) -> String {
-    if v.is_empty() {
-        "none".into()
-    } else {
-        dollars_list(v)
+    match v.len() {
+        0 => "none".into(),
+        1..=4 => dollars_list(v),
+        n => format!("{} (${} … ${})", n, util::commas(v[0], 2), util::commas(v[n - 1], 2)),
     }
 }
 
@@ -353,7 +353,7 @@ impl<'a> Report<'a> {
                 Cell::F(o.max_gain),
                 Cell::F(o.max_loss),
                 Cell::F(rr(o)),
-                Cell::s(if o.breakevens.is_empty() { "–".to_string() } else { dollars_list(&o.breakevens) }),
+                super::be_cell(&o.breakevens),
                 Cell::F(o.pop.unwrap_or(f64::NAN)),
                 Cell::F(o.fill.as_ref().map(|f| f.p_fill).unwrap_or(f64::NAN)),
                 Cell::F(exp_profit(o)),

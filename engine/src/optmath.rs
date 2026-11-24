@@ -60,13 +60,27 @@ pub fn payoff_curves(legs: &[LegIn], spot: f64, today: NaiveDate, shares: f64, s
             now[i] += mult * bs_price(x, c.strike, t, iv, c.right, 0.04);
         }
     }
-    let sign = |v: f64| if v > 0.0 { 1 } else if v < 0.0 { -1 } else { 0 };
+    // Breakevens: where the P&L changes sign. Values within a cent of zero count as zero, so a P&L that
+    // sits at exactly $0 over a range (e.g. an inverted iron condor whose credit equals its losses) adds
+    // no rounding-noise crossings; touching zero and turning back isn't a breakeven either.
+    let sign = |v: f64| if v > 0.005 { 1 } else if v < -0.005 { -1 } else { 0 };
     let mut be = Vec::new();
-    for i in 0..n.saturating_sub(1) {
-        let (a, b) = (sign(at_exp[i]), sign(at_exp[i + 1]));
-        if a != 0 && a != b {
-            be.push(round_dp(xs[i] - at_exp[i] * (xs[i + 1] - xs[i]) / (at_exp[i + 1] - at_exp[i]), 2));
+    let mut last: Option<(usize, i32)> = None;     // last point with a clear sign
+    for i in 0..n {
+        let s = sign(at_exp[i]);
+        if s == 0 {
+            continue;
         }
+        if let Some((j, ls)) = last {
+            if ls != s {
+                be.push(round_dp(if j + 1 == i {
+                    xs[j] - at_exp[j] * (xs[i] - xs[j]) / (at_exp[i] - at_exp[j])
+                } else {
+                    xs[i - 1]                       // left a $0 stretch on the losing/winning side
+                }, 2));
+            }
+        }
+        last = Some((i, s));
     }
     let max_profit = at_exp.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let max_loss = at_exp.iter().cloned().fold(f64::INFINITY, f64::min);
