@@ -605,10 +605,11 @@ impl<'a> Report<'a> {
                 "xaxis": {"tickprefix": "$", "title": {"text": format!("{} price at expiration", und)}}, "yaxis": {"tickprefix": "$"},
                 "annotations": [{"x": spot, "yref": "paper", "y": 1, "text": format!("spot ${}", util::commas(spot, 2)), "showarrow": false, "yanchor": "bottom", "font": {"size": 11}}]}),
                 380, "", "", "", false);
-            let mut tb = Tbl::new(&["Strategy", "Legs", "Cost", "Value", "Unrealized", "Max gain", "Max loss", "Breakevens", "Δ sh", "Θ $/day"])
+            let mut tb = Tbl::new(&["Strategy", "Legs", "Cost", "Value", "Unrealized", "P&L if filled", "Max gain", "Max loss", "Breakevens", "Δ sh", "Θ $/day"])
                 .f("Cost", super::fm(true, 2))
                 .f("Value", super::fm(true, 2))
                 .f("Unrealized", super::fm(true, 2))
+                .f("P&L if filled", super::fm(true, 2))
                 .f("Max gain", super::flim())
                 .f("Max loss", super::flim_loss())
                 .f("Δ sh", super::fnum(1))
@@ -625,6 +626,18 @@ impl<'a> Report<'a> {
                             Cell::OrderF(grp.unrealized(), id, refs)
                         }
                         None => Cell::F(grp.unrealized()),
+                    },
+                    // the open order that closes exactly these legs, if it fills at its limit
+                    match legs_of(&grp.units).filter(|_| !self.share) {
+                        Some(l) => match closer(&l, grp.cost, f64::NAN, &orders, "0") {
+                            (id, refs, Some((pnl, _))) => {
+                                let mut v: Value = serde_json::from_str(&refs).unwrap_or(json!({}));
+                                v["profit"] = json!(true);
+                                Cell::OrderF(pnl, id, v.to_string())
+                            }
+                            _ => Cell::N,
+                        },
+                        None => Cell::N,
                     },
                     Cell::F(grp.max_gain),
                     Cell::F(grp.max_loss),
@@ -651,7 +664,7 @@ impl<'a> Report<'a> {
                 vid,
                 if j == 0 { "" } else { " hidden" },
                 summary,
-                table(&tb, &format!("t_read_{}_{}", i, j), &["Unrealized"]),
+                table(&tb, &format!("t_read_{}_{}", i, j), &["Unrealized", "P&L if filled"]),
                 fig
             ));
         }
