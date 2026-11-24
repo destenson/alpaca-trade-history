@@ -37,6 +37,8 @@ pub struct Curves {
     pub expiry: Vec<f64>,
     pub today: Vec<f64>,
     pub breakevens: Vec<f64>,
+    /// price ranges where the P&L at expiration is positive; open ends are ±infinity
+    pub zones: Vec<(f64, f64)>,
     pub max_profit: f64,
     pub max_loss: f64,
 }
@@ -82,6 +84,38 @@ pub fn payoff_curves(legs: &[LegIn], spot: f64, today: NaiveDate, shares: f64, s
         }
         last = Some((i, s));
     }
+    // profit zones: runs of clearly positive P&L, bounded by the crossing (or the edge of a $0 stretch)
+    // where a zone meets a $0 stretch the P&L bends at a strike inside that grid step: use the strike
+    let strikes: Vec<f64> = legs.iter().filter_map(|l| parse_occ(&l.symbol).map(|c| c.strike)).collect();
+    let kink = |a: f64, b: f64, fallback: f64| strikes.iter().copied().filter(|k| *k >= a.min(b) && *k <= a.max(b)).min_by(|x, y| (x - fallback).abs().partial_cmp(&(y - fallback).abs()).unwrap()).unwrap_or(fallback);
+    let mut zones: Vec<(f64, f64)> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        if sign(at_exp[i]) <= 0 {
+            i += 1;
+            continue;
+        }
+        let lo = if i == 0 {
+            f64::NEG_INFINITY
+        } else if sign(at_exp[i - 1]) < 0 {
+            xs[i - 1] - at_exp[i - 1] * (xs[i] - xs[i - 1]) / (at_exp[i] - at_exp[i - 1])
+        } else {
+            kink(xs[i - 1], xs[i], xs[i - 1])
+        };
+        let mut j = i;
+        while j + 1 < n && sign(at_exp[j + 1]) > 0 {
+            j += 1;
+        }
+        let hi = if j + 1 >= n {
+            f64::INFINITY
+        } else if sign(at_exp[j + 1]) < 0 {
+            xs[j] - at_exp[j] * (xs[j + 1] - xs[j]) / (at_exp[j + 1] - at_exp[j])
+        } else {
+            kink(xs[j], xs[j + 1], xs[j + 1])
+        };
+        zones.push((round_dp(lo, 2), round_dp(hi, 2)));
+        i = j + 1;
+    }
     let max_profit = at_exp.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let max_loss = at_exp.iter().cloned().fold(f64::INFINITY, f64::min);
     Curves {
@@ -89,6 +123,7 @@ pub fn payoff_curves(legs: &[LegIn], spot: f64, today: NaiveDate, shares: f64, s
         expiry: at_exp.iter().map(|x| round_dp(*x, 2)).collect(),
         today: now.iter().map(|x| round_dp(*x, 2)).collect(),
         breakevens: be,
+        zones,
         max_profit,
         max_loss,
     }

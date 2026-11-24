@@ -59,6 +59,7 @@ pub fn tip(label: &str) -> Option<&'static str> {
         "Legs" => "Each leg as expiry and strike/type, e.g. 11/27 340C = the Nov 27 340 call. Blue = buy (long), red = sell (short); a number before it is the quantity when it isn't 1 (2×345C). Each expiry is written once. Hover a leg for details.",
         "Side" => "Long = bought first, short = sold first.",
         "Breakevens" => "Underlying prices at expiration where P&L crosses zero.",
+        "Profit zone" => "Underlying prices at expiration where the position makes money: \"$35.60–$60.40\" between, \"<$47.00, >$50.00\" outside, \">$85.42\" above. Hover for the exact breakevens.",
         "IV" => "Implied volatility: the yearly move the option price implies (from Alpaca's snapshot).",
         "Δ sh" => "Delta in share-equivalents: P&L change for a $1 move in the underlying.",
         "Δ shares" => "Delta in share-equivalents: P&L change for a $1 move in the underlying.",

@@ -814,7 +814,9 @@ pub fn classify(c: &Combo) -> String {
         };
         if let (Some(vc), Some(vp)) = (vert(&calls, true), vert(&puts, false)) {
             if vc.0 == "credit" && vp.0 == "credit" {
-                return if vc.1 == vp.1 { "Iron butterfly" } else { "Iron condor" }.into();
+                // short call below the short put: the strikes cross ("inverted"), so the credit covers
+                // part of a loss that is certain at expiration
+                return if vc.1 == vp.1 { "Iron butterfly" } else if vc.1 < vp.1 { "Inverted iron condor" } else { "Iron condor" }.into();
             }
             if vc.0 == "debit" && vp.0 == "debit" {
                 return "Reverse iron condor".into();
@@ -846,7 +848,7 @@ pub fn max_risk(c: &Combo) -> f64 {
         let width = (strike(0) - strike(1)).abs() * legs[0].1.abs() * 100.0;
         return if debit > 0.0 { debit } else { width - c.open_cash };
     }
-    if matches!(s, "Iron condor" | "Iron butterfly" | "Reverse iron condor") || s.ends_with("double vertical") {
+    if matches!(s, "Iron condor" | "Inverted iron condor" | "Iron butterfly" | "Reverse iron condor") || s.ends_with("double vertical") {
         let mut calls: Vec<f64> = legs.iter().filter_map(|(k, _)| k.as_ref().filter(|k| k.is_call()).map(|k| k.strike)).collect();
         let mut puts: Vec<f64> = legs.iter().filter_map(|(k, _)| k.as_ref().filter(|k| !k.is_call()).map(|k| k.strike)).collect();
         calls.sort_by(|a, b| a.partial_cmp(b).unwrap());

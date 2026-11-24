@@ -55,6 +55,7 @@ pub struct OrderCurves {
     pub comb_max_loss: f64,
     pub comb_max_gain: f64,
     pub comb_breakevens: Vec<f64>,
+    pub comb_zones: Vec<(f64, f64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -100,6 +101,7 @@ pub struct PendingOrder {
     pub max_gain: f64,
     pub max_loss: f64,
     pub breakevens: Vec<f64>,
+    pub zones: Vec<(f64, f64)>,
     pub pop: Option<f64>,
     pub expiry: Option<NaiveDate>,
     pub curves: Option<OrderCurves>,
@@ -192,6 +194,7 @@ pub fn parse_orders(raw: &[Value]) -> Vec<PendingOrder> {
             max_gain: f64::NAN,
             max_loss: f64::NAN,
             breakevens: vec![],
+            zones: vec![],
             pop: None,
             expiry: None,
             curves: None,
@@ -454,6 +457,7 @@ pub fn evaluate(
         po.max_gain = g.max_gain;
         po.max_loss = g.max_loss;
         po.breakevens = g.breakevens.clone();
+        po.zones = g.zones.clone();
         let mut ivs: Vec<f64> = po
             .legs
             .iter()
@@ -507,6 +511,7 @@ pub fn evaluate(
             curves.comb_max_loss = comb.max_loss;
             curves.comb_max_gain = comb.max_gain;
             curves.comb_breakevens = comb.breakevens;
+            curves.comb_zones = comb.zones;
         }
         po.curves = Some(curves);
     }
@@ -517,6 +522,7 @@ pub struct Combined {
     pub max_gain: f64,
     pub max_loss: f64,
     pub breakevens: Vec<f64>,
+    pub zones: Vec<(f64, f64)>,
     pub net: f64,
     pub spot: f64,
     pub n: usize,
@@ -542,6 +548,7 @@ pub fn combine(orders: &[&PendingOrder], open_positions: &[OpenPos], snapshots: 
         max_gain: g.max_gain,
         max_loss: g.max_loss,
         breakevens: g.breakevens.clone(),
+        zones: g.zones.clone(),
         net: os.iter().map(|o| o.net.unwrap() * o.units * o.mult()).sum(),
         spot,
         n: os.len(),
@@ -569,6 +576,7 @@ pub fn combine(orders: &[&PendingOrder], open_positions: &[OpenPos], snapshots: 
         d.curves.comb_max_loss = comb.max_loss;
         d.curves.comb_max_gain = comb.max_gain;
         d.curves.comb_breakevens = comb.breakevens;
+        d.curves.comb_zones = comb.zones;
     }
     Some(d)
 }

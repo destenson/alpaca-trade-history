@@ -58,6 +58,7 @@ pub struct Group {
     pub max_gain: f64,
     pub max_loss: f64,
     pub breakevens: Vec<f64>,
+    pub zones: Vec<(f64, f64)>,
     pub cost: f64,
     pub value: f64,
     pub greeks: Greeks,
@@ -217,6 +218,7 @@ pub fn evaluate(units: &[&Unit], strategy: &str, spot: f64, today: NaiveDate, xs
         max_gain,
         max_loss,
         breakevens: risk.breakevens,
+        zones: risk.zones,
         cost: units.iter().map(|u| u.cost).sum(),
         value: units.iter().map(|u| u.value).sum(),
         greeks,
@@ -242,6 +244,7 @@ pub struct Whole {
     pub max_gain: f64,
     pub max_loss: f64,
     pub breakevens: Vec<f64>,
+    pub zones: Vec<(f64, f64)>,
     pub unrealized: f64,
     pub greeks: Greeks,
 }
@@ -342,6 +345,7 @@ pub fn readings(units: &[Unit], spot: f64, today: NaiveDate, opened: Option<&[Ve
         max_gain: whole.max_gain,
         max_loss: whole.max_loss,
         breakevens: whole.breakevens.clone(),
+        zones: whole.zones.clone(),
         unrealized: whole.unrealized(),
         greeks: whole.greeks.clone(),
     };

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 use serde_json::{json, Value};
 
-use super::{dollars_list, jf, jr, jvec, leg, lim, pn, slug, spot_from, table, when, Cell, Report, Tbl, GAIN, LOSS, NEUTRAL, S};
+use super::{jf, jr, jvec, leg, lim, pn, slug, spot_from, table, when, Cell, Report, Tbl, GAIN, LOSS, NEUTRAL, S};
 use crate::analysis::Recon;
 use crate::fillodds::fill_odds;
 use crate::orders::{self as O, PendingOrder};
@@ -145,14 +145,6 @@ fn fill_text(est_unit: Option<f64>, net: f64) -> String {
         "at or through your limit: likely to fill near the open".into()
     } else {
         format!("your limit is ${} better than the estimate: fills only if prices move your way", commas(d, 2))
-    }
-}
-
-fn bes(v: &[f64]) -> String {
-    match v.len() {
-        0 => "none".into(),
-        1..=4 => dollars_list(v),
-        n => format!("{} (${} … ${})", n, util::commas(v[0], 2), util::commas(v[n - 1], 2)),
     }
 }
 
@@ -312,7 +304,7 @@ impl<'a> Report<'a> {
         let mut entry = Tbl::new(&["#", "Underlying", "Strategy", "Legs", "DTE", "Limit", "Mid (quoted)", "Natural", "Edge vs mid", est_col, "Edge vs est.", "TIF", "Placed"])
             .f("Edge vs mid", super::fm(true, 2))
             .f("Edge vs est.", super::fm(true, 2));
-        let mut payoff = Tbl::new(&["#", "Underlying", "Strategy", "Legs", "Expires", "Limit", "Natural", "Max profit", "Max loss", "Reward/risk", "Breakevens", "Prob. profit", "Fill", "Exp. profit"])
+        let mut payoff = Tbl::new(&["#", "Underlying", "Strategy", "Legs", "Expires", "Limit", "Natural", "Max profit", "Max loss", "Reward/risk", "Profit zone", "Prob. profit", "Fill", "Exp. profit"])
             .f("Max profit", super::flim())
             .f("Max loss", super::flim_loss())
             .f("Reward/risk", super::fnum(2))
@@ -353,7 +345,7 @@ impl<'a> Report<'a> {
                 Cell::F(o.max_gain),
                 Cell::F(o.max_loss),
                 Cell::F(rr(o)),
-                super::be_cell(&o.breakevens),
+                super::zone_cell(&o.zones, &o.breakevens),
                 Cell::F(o.pop.unwrap_or(f64::NAN)),
                 Cell::F(o.fill.as_ref().map(|f| f.p_fill).unwrap_or(f64::NAN)),
                 Cell::F(exp_profit(o)),
@@ -478,16 +470,15 @@ impl<'a> Report<'a> {
         let mut group_open: Option<String> = None;
         for (j, (all, und, os)) in items.iter().enumerate() {
             let vid = format!("ov_{}", j);
-            let (label, cur, mut stats, comb_ml, comb_mg, comb_be, sp, exp_lbl, model, net_total, um, rows_k, est_total);
+            let (label, cur, mut stats, comb_ml, comb_mg, sp, exp_lbl, model, net_total, um, rows_k, est_total);
             let no_market = os.iter().all(|&i| opening[i].unpriced());
             if *all {
                 let refs: Vec<&PendingOrder> = os.iter().map(|&i| &opening[i]).collect();
                 let Some(d) = O::combine(&refs, &a.open_positions, snaps, today, Some(&market)) else { continue };
                 label = format!("{}: all {} orders together", und, os.len());
-                stats = format!("{} orders · net {} · max profit {} · max loss {} · breakevens {}", os.len(), px(Some(d.net), false), lim(d.max_gain), super::lim_loss(d.max_loss), bes(&d.breakevens));
+                stats = format!("{} orders · net {} · max profit {} · max loss {} · profit zone {}", os.len(), px(Some(d.net), false), lim(d.max_gain), super::lim_loss(d.max_loss), super::zones_text(&d.zones));
                 comb_ml = d.curves.comb_max_loss;
                 comb_mg = d.curves.comb_max_gain;
-                comb_be = d.curves.comb_breakevens.clone();
                 sp = d.spot;
                 exp_lbl = os.iter().filter_map(|&i| opening[i].expiry).min();
                 model = d.model.clone();
@@ -502,7 +493,7 @@ impl<'a> Report<'a> {
                 label = format!("#{} {} @ {}", k, name(o), px(o.net, o.net_is_estimate));
                 cur = o.curves.clone().unwrap();
                 stats = format!(
-                    "{} · limit {} (quoted mid {}, natural {}) · max profit {} · max loss {} · reward/risk {} · breakevens {}{}",
+                    "{} · limit {} (quoted mid {}, natural {}) · max profit {} · max loss {} · reward/risk {} · profit zone {}{}",
                     o.legs_label(),
                     px(o.net, o.net_is_estimate),
                     px(o.mid_now, false),
@@ -510,12 +501,11 @@ impl<'a> Report<'a> {
                     lim(o.max_gain),
                     super::lim_loss(o.max_loss),
                     num(rr(o), 2),
-                    bes(&o.breakevens),
+                    super::zones_text(&o.zones),
                     o.pop.map(|p| format!(" · prob. of profit ~{}", pyfmt_pct(p, 0, false))).unwrap_or_default()
                 );
                 comb_ml = cur.comb_max_loss;
                 comb_mg = cur.comb_max_gain;
-                comb_be = cur.comb_breakevens.clone();
                 sp = o.spot.unwrap();
                 exp_lbl = o.expiry;
                 model = o.model.clone();
@@ -541,11 +531,11 @@ impl<'a> Report<'a> {
             }
             if cur.combined.is_some() {
                 stats.push_str(&format!(
-                    "<br>With your current {} position: max loss after fill {} · max profit {} · breakevens {}",
+                    "<br>With your current {} position: max loss after fill {} · max profit {} · profit zone {}",
                     esc(und),
                     super::lim_loss(comb_ml),
                     lim(comb_mg),
-                    bes(&comb_be)
+                    super::zones_text(&cur.comb_zones)
                 ));
             }
             let open_name = if model.is_some() { if market.is_open { "Order now (est.)" } else { "Order at next open (est.)" } } else { "Order today (at IV)" };

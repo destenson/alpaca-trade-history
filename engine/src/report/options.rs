@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use serde_json::{json, Value};
 
 use super::trades::Group;
-use super::{dollars_list, dur, iso, jf, jr, jvec, lim, pn, slug, spot_from, table, when, Cell, Report, Tbl, NEUTRAL, S};
+use super::{dur, iso, jf, jr, jvec, lim, pn, slug, spot_from, table, when, Cell, Report, Tbl, NEUTRAL, S};
 use crate::analysis::{ComboRow, OpenPos};
 use crate::interpret::{build_units, readings, OptRow};
 use crate::orders as O;
@@ -457,14 +457,10 @@ impl<'a> Report<'a> {
             None => String::new(),
         };
         let mut head = format!(
-            "Whole position: max gain {} · max loss {} · breakevens {} · unrealized {}{}",
+            "Whole position: max gain {} · max loss {} · profit zone {} · unrealized {}{}",
             lim(whole.max_gain),
             super::lim_loss(whole.max_loss),
-            match whole.breakevens.len() {
-                0 => "none".to_string(),
-                1..=4 => dollars_list(&whole.breakevens),
-                n => format!("{} (${} … ${})", n, util::commas(whole.breakevens[0], 2), util::commas(whole.breakevens[n - 1], 2)),
-            },
+            super::zones_text(&whole.zones),
             money(whole.unrealized, true, 2),
             match whole.greeks.theta.filter(|t| *t != 0.0) {
                 Some(t) => format!(" · Δ {} sh · Θ {}/day", num(whole.greeks.delta.unwrap_or(0.0), 1), money(t, true, 2)),
@@ -609,7 +605,7 @@ impl<'a> Report<'a> {
                 "xaxis": {"tickprefix": "$", "title": {"text": format!("{} price at expiration", und)}}, "yaxis": {"tickprefix": "$"},
                 "annotations": [{"x": spot, "yref": "paper", "y": 1, "text": format!("spot ${}", util::commas(spot, 2)), "showarrow": false, "yanchor": "bottom", "font": {"size": 11}}]}),
                 380, "", "", "", false);
-            let mut tb = Tbl::new(&["Strategy", "Legs", "Cost", "Value", "Unrealized", "P&L if filled", "Max gain", "Max loss", "Breakevens", "Δ sh", "Θ $/day"])
+            let mut tb = Tbl::new(&["Strategy", "Legs", "Cost", "Value", "Unrealized", "P&L if filled", "Max gain", "Max loss", "Profit zone", "Δ sh", "Θ $/day"])
                 .f("Cost", super::fm(true, 2))
                 .f("Value", super::fm(true, 2))
                 .f("Unrealized", super::fm(true, 2))
@@ -645,7 +641,7 @@ impl<'a> Report<'a> {
                     },
                     Cell::F(grp.max_gain),
                     Cell::F(grp.max_loss),
-                    super::be_cell(&grp.breakevens),
+                    super::zone_cell(&grp.zones, &grp.breakevens),
                     Cell::F(grp.greeks.delta.unwrap_or(f64::NAN)),
                     Cell::F(grp.greeks.theta.unwrap_or(f64::NAN)),
                 ]);

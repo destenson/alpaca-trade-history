@@ -489,13 +489,28 @@ pub fn when(m: &Market) -> String {
     format!("the next open ({} {}, {} ET)", v.format("%a %b"), chrono::Datelike::day(&v), util::clock(&v))
 }
 
-/// Breakevens for a table cell: up to 4 listed; more read "6 breakevens · $6.01 … $7.12", all in a tooltip.
-pub fn be_cell(v: &[f64]) -> Cell {
-    match v.len() {
-        0 => Cell::s("–"),
-        1..=4 => Cell::s(dollars_list(v)),
-        n => Cell::Tip(format!("{} breakevens · ${} … ${}", n, util::commas(v[0], 2), util::commas(v[n - 1], 2)), format!("Breakevens: {}", dollars_list(v))),
+/// Profit zones as text: "<$47.00, >$50.00", "$35.60–$60.40", ">$85.42"; "always" / "never".
+pub fn zones_text(z: &[(f64, f64)]) -> String {
+    if z.is_empty() {
+        return "never".into();
     }
+    z.iter()
+        .map(|&(lo, hi)| match (lo.is_infinite(), hi.is_infinite()) {
+            (true, true) => "always".to_string(),
+            (true, false) => format!("<${}", util::commas(hi, 2)),
+            (false, true) => format!(">${}", util::commas(lo, 2)),
+            _ => format!("${}–${}", util::commas(lo, 2), util::commas(hi, 2)),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Profit zone for a table cell, the exact breakevens in its tooltip; more than 3 zones are summarized.
+pub fn zone_cell(z: &[(f64, f64)], be: &[f64]) -> Cell {
+    let full = zones_text(z);
+    let text = if z.len() > 3 { format!("{} zones · {} … {}", z.len(), zones_text(&z[..1]), zones_text(&z[z.len() - 1..])) } else { full.clone() };
+    let tip = format!("{}Breakevens: {}", if z.len() > 3 { format!("Profit zones: {}. ", full) } else { String::new() }, if be.is_empty() { "none".to_string() } else { dollars_list(be) });
+    Cell::Tip(text, tip)
 }
 
 pub fn dollars_list(v: &[f64]) -> String {
