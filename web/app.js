@@ -1150,6 +1150,19 @@ function openOrderDialog(d, place = false) {
   ordCur.basis = basis !== null && scale > 0 && (!place || o.synthetic) ? basis : null;
   ordCur.scale = scale;
   $('ordProfitRow').hidden = ordCur.basis === null;
+  // stock closing orders can carry a stop-loss: an OCO (take-profit limit + stop) — Alpaca has no OCO for options
+  const isOco = o.order_class === 'oco';
+  const stopLeg = isOco ? (o.legs || []).find((l) => l.stop_price != null) : null;
+  ordCur.isOco = isOco;
+  ordCur.recreate0 = ordCur.recreate;
+  ordCur.stopLeg = stopLeg;
+  ordCur.ocoOk = !mleg && ordCur.mult === 1 && o.type === 'limit' && Number.isInteger(+o.qty) &&
+    (isOco || ordCur.basis !== null || /_to_close$/.test(o.position_intent || ''));
+  $('ordSlRow').hidden = !ordCur.ocoOk;
+  $('ordSlOn').checked = isOco; $('ordSlOn').disabled = isOco;
+  $('ordSl').value = stopLeg ? (+stopLeg.stop_price).toString() : '';
+  $('ordSlLim').value = stopLeg?.limit_price != null ? (+stopLeg.limit_price).toString() : '';
+  slSync();
   $('ordKill').hidden = place;
   if (ordCur.basis !== null) syncProfit();
   // clicked Unrealized: set the limit that closes at that profit
@@ -1160,6 +1173,33 @@ function openOrderDialog(d, place = false) {
   }
   const focus = ordCur.basis !== null && ref.profit ? $('ordProfit') : $('ordPx');
   focus.focus(); focus.select();
+}
+// stop-loss inputs: enabled with the checkbox; the note shows the P&L at the stop against the cost basis
+function slVals() {
+  const c = ordCur;
+  if (!c?.ocoOk || !$('ordSlOn').checked) return null;
+  const sp = Number($('ordSl').value), sl = $('ordSlLim').value === '' ? null : Number($('ordSlLim').value);
+  return { stop: Number.isFinite(sp) && sp > 0 ? roundPx(c, sp) : null, limit: sl !== null && Number.isFinite(sl) && sl > 0 ? roundPx(c, sl) : null };
+}
+function slSync() {
+  const c = ordCur, on = !!c?.ocoOk && $('ordSlOn').checked;
+  $('ordSl').disabled = !on; $('ordSlLim').disabled = !on;
+  const v = slVals();
+  let t = '';
+  if (on && v?.stop && c.basis !== null) {
+    const px = v.limit ?? v.stop, sgn = c.order.side === 'sell' ? 1 : -1;
+    const pnl = sgn * px * c.qty - c.basis;
+    t = `At the stop: ${pnl < 0 ? '−' : '+'}${money2(pnl)} vs. cost basis` + (v.limit ? ' (if it fills at the stop limit)' : ' (a stop becomes a market order: it can fill worse in a gap)');
+  } else if (on) t = c.isOco ? '' : 'The order becomes an OCO: the take-profit limit above, and a stop-loss; whichever fills first cancels the other.';
+  $('ordSlNote').textContent = t; $('ordSlNote').hidden = !t;
+}
+for (const id of ['ordSlOn', 'ordSl', 'ordSlLim']) $(id).addEventListener('input', () => { slSync(); setOrdMode(); $('ordErr').hidden = true; });
+// the same stock position closed by an OCO: take-profit limit + stop-loss (stop, or stop-limit)
+function ocoBody(o, tp, sl) {
+  const stop = { stop_price: fmtPx(ordCur, sl.stop) };
+  if (sl.limit) stop.limit_price = fmtPx(ordCur, sl.limit);
+  return { symbol: o.symbol, qty: o.qty, side: o.side, type: 'limit', time_in_force: o.time_in_force === 'day' ? 'day' : 'gtc', order_class: 'oco',
+    take_profit: { limit_price: fmtPx(ordCur, tp) }, stop_loss: stop };
 }
 function setOrdMode() {
   $('ordConfirm').hidden = true;
@@ -1277,7 +1317,20 @@ $('ordGo').addEventListener('click', async () => {
   const c = ordCur;
   if (c.killing) setOrdMode();             // the cancel confirmation was showing: start this review afresh
   if ($('ordConfirm').hidden) {           // first click: show exactly what will be sent
-    if (nl === c.lim && !c.place) { showOrdErr('That is the current limit.'); return; }
+    const sl = slVals();
+    const slOld = c.stopLeg ? { stop: +c.stopLeg.stop_price, limit: c.stopLeg.limit_price != null ? +c.stopLeg.limit_price : null } : null;
+    const slChanged = !!sl && (!slOld || sl.stop !== slOld.stop || (sl.limit ?? null) !== (slOld.limit ?? null));
+    if (sl) {
+      if (!sl.stop) { showOrdErr('Enter a stop price, or untick Stop-loss.'); return; }
+      const sell = c.order.side === 'sell';
+      if (sell ? !(sl.stop < nl) : !(sl.stop > nl)) { showOrdErr(`The stop must be ${sell ? 'below' : 'above'} the take-profit limit.`); return; }
+      if (sl.limit && (sell ? sl.limit > sl.stop : sl.limit < sl.stop)) { showOrdErr(`The stop limit must be at or ${sell ? 'below' : 'above'} the stop price.`); return; }
+    }
+    c.sl = sl; c.slChanged = slChanged;
+    // turning a plain order into an OCO: cancel it and place the OCO (Alpaca can't convert in place)
+    c.convert = !!sl && !c.isOco && !c.place;
+    c.recreate = c.recreate0 || c.convert;
+    if (nl === c.lim && !c.place && !slChanged) { showOrdErr('That is the current limit.'); return; }
     // buying power: the old order's share is released when it is replaced or cancelled
     $('ordGo').disabled = true;
     let bpNote = '';
@@ -1304,7 +1357,15 @@ $('ordGo').addEventListener('click', async () => {
     const tot = Math.abs(nl) * c.qty * c.mult;
     const sideTot = c.mleg ? (nl < 0 ? `receive ${money2(tot)}` : nl > 0 ? `pay ${money2(tot)}` : 'no premium') : `${money2(tot)}`;
     const what = `${dc(c.lim, c.mleg)} → ${dc(nl, c.mleg)} (${c.mult === 1 ? c.qty + ' sh' : c.qty + ' × 100'}: ${sideTot} if it fills, before fees)`;
-    $('ordConfirm').textContent = c.closing
+    const slTxt = c.sl ? ` with a stop-loss at ${money2(c.sl.stop)}${c.sl.limit ? ` (stop-limit ${money2(c.sl.limit)})` : ''} (OCO: whichever fills first cancels the other)` : '';
+    $('ordConfirm').textContent = (c.sl ? '' : '') + (c.convert
+      ? `Cancel this order, then place an OCO for the same ${c.qty} sh: take-profit ${money2(nl)}${slTxt}. ` +
+        'Two separate steps: if Alpaca rejects the OCO, the original order is placed again.' + bpNote
+      : c.closing && c.sl
+      ? `Place a new GTC OCO closing order for ${c.qty} sh: take-profit ${money2(nl)}${slTxt}.` + bpNote
+      : c.isOco && !c.recreate
+      ? `Change the OCO: take-profit ${dc(c.lim, false)} → ${money2(nl)}` + (c.slChanged ? `; stop-loss → ${money2(c.sl.stop)}${c.sl.limit ? ` (limit ${money2(c.sl.limit)})` : ''}` : '') + '.' + bpNote
+      : '') || (c.closing
       ? `Place a new GTC closing order for these legs at ${dc(nl, c.mleg)} (${c.mult === 1 ? c.qty + ' sh' : c.qty + ' × 100'}: ${sideTot} if it fills, before fees).` + bpNote
       : c.place
       ? `Place a new order: the same legs, quantity and ${(c.order.time_in_force || '').toUpperCase()} as the cancelled one, at ${dc(nl, c.mleg)} ` +
@@ -1312,7 +1373,7 @@ $('ordGo').addEventListener('click', async () => {
       : c.recreate
       ? `Cancel this order, then place the same order (same legs, quantity and ${(c.order.time_in_force || '').toUpperCase()}) at the new limit: ${what}. ` +
         'Two separate steps: if Alpaca rejects the new order, the original order is placed again at its old price.' + bpNote
-      : `Replace the order's limit ${what}. Alpaca cancels the old order and places the new one at once.` + bpNote;
+      : `Replace the order's limit ${what}. Alpaca cancels the old order and places the new one at once.` + bpNote);
     $('ordConfirm').hidden = false;
     $('ordGo').textContent = c.place ? 'Confirm: place order' : c.recreate ? 'Confirm cancel & re-place' : 'Confirm change';
     return;
@@ -1321,8 +1382,8 @@ $('ordGo').addEventListener('click', async () => {
   const api = new Alpaca(lastCreds);
   if (c.place) {
     try {
-      const res = await api.placeOrder(orderBody(c.order, nl));
-      await afterOrderChange(`· ${c.und} ${c.closing ? 'closing order placed' : 'order placed again'} at ${dc(nl, c.mleg)} (Alpaca status: ${res?.status || 'sent'})`);
+      const res = await api.placeOrder(c.sl ? ocoBody(c.order, nl, c.sl) : orderBody(c.order, nl));
+      await afterOrderChange(`· ${c.und} ${c.closing ? (c.sl ? 'OCO closing order placed' : 'closing order placed') : 'order placed again'} at ${dc(nl, c.mleg)} (Alpaca status: ${res?.status || 'sent'})`);
     } catch (e) {
       showOrdErr(`Alpaca rejected the order (${e.message}). Nothing was placed.`);
       $('ordGo').disabled = false; $('ordGo').textContent = 'Confirm: place order';
@@ -1331,11 +1392,17 @@ $('ordGo').addEventListener('click', async () => {
   }
   if (!c.recreate) {
     try {
-      const res = await api.replaceOrder(c.id, { limit_price: (nl < 0 ? '-' : '') + fmtPx(c, nl) });
+      let res = null;
+      if (nl !== c.lim) res = await api.replaceOrder(c.id, { limit_price: (nl < 0 ? '-' : '') + fmtPx(c, nl) });
+      if (c.isOco && c.slChanged && c.stopLeg?.id) {
+        const body = { stop_price: fmtPx(c, c.sl.stop) };
+        if (c.sl.limit) body.limit_price = fmtPx(c, c.sl.limit);
+        await api.replaceOrder(c.stopLeg.id, body);
+      }
       await afterOrderChange(`· ${c.und} order changed to ${dc(nl, c.mleg)} (Alpaca status: ${res?.status || 'sent'})`);
     } catch (e) {
       if (e.status === 422 && /accepted/i.test(e.message)) {     // became (or still is) "accepted": offer cancel & re-place
-        c.recreate = true; setOrdMode();
+        c.recreate = c.recreate0 = true; setOrdMode();
         showOrdErr(`Alpaca can't change it in place: ${e.message}. You can cancel it and place it again at the new price instead.`);
         return;
       }
@@ -1366,13 +1433,14 @@ $('ordGo').addEventListener('click', async () => {
   }
   $('ordGo').textContent = 'Placing…';
   try {
-    const res = await api.placeOrder(orderBody(c.order, nl));
-    await afterOrderChange(`· ${c.und} order cancelled and placed again at ${dc(nl, c.mleg)} (Alpaca status: ${res?.status || 'sent'})`);
+    const res = await api.placeOrder(c.sl ? ocoBody(c.order, nl, c.sl) : orderBody(c.order, nl));
+    await afterOrderChange(`· ${c.und} order cancelled and placed again${c.convert ? ' as an OCO' : ''} at ${dc(nl, c.mleg)} (Alpaca status: ${res?.status || 'sent'})`);
   } catch (e) {
     // put the original order back at its old price
     $('ordGo').textContent = 'Restoring…';
     try {
-      await api.placeOrder(orderBody(c.order, c.lim));
+      const old = c.stopLeg ? { stop: +c.stopLeg.stop_price, limit: c.stopLeg.limit_price != null ? +c.stopLeg.limit_price : null } : null;
+      await api.placeOrder(c.isOco && old ? ocoBody(c.order, c.lim, old) : orderBody(c.order, c.lim));
       await afterOrderChange(`· ${c.und}: Alpaca rejected the new price (${e.message}); the original order was placed again at ${dc(c.lim, c.mleg)}`, true);
     } catch (e2) {
       await afterOrderChange(`· ${c.und}: the old order was cancelled, Alpaca rejected the new one (${e.message}) and placing the original again failed too (${e2.message}). You have no order for it now`, true);

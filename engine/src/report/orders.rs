@@ -820,8 +820,50 @@ impl<'a> Report<'a> {
         }
         // positions no open order closes: one collapsible group per underlying
         let covered = |x: &crate::analysis::OpenPos| orders.iter().any(|o| o.legs.iter().any(|l| l.symbol == x.symbol && (l.ratio > 0.0) != (x.qty > 0.0)));
-        let mut un: std::collections::BTreeMap<&str, Vec<&crate::analysis::OpenPos>> = std::collections::BTreeMap::new();
+        // shares that secure short calls (100 per net short call, held or in an open sell-to-open order)
+        // are spoken for: they leave the card, or reduce the shares shown
+        let mut secured: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        {
+            let mut calls: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+            for x in op.iter().filter(|x| x.is_option) {
+                if crate::occ::parse_occ(&x.symbol).map(|c| c.right == 'C').unwrap_or(false) {
+                    *calls.entry(x.underlying.clone()).or_insert(0.0) += x.qty;
+                }
+            }
+            for (u, q) in calls {
+                if q < 0.0 {
+                    *secured.entry(u).or_insert(0.0) += -q * 100.0;
+                }
+            }
+            for o in &orders {
+                let net: f64 = o.legs.iter().filter(|l| crate::occ::parse_occ(&l.symbol).map(|c| c.right == 'C').unwrap_or(false) && l.intent != "close").map(|l| l.ratio * o.units).sum();
+                if net < 0.0 {
+                    *secured.entry(o.underlying.clone()).or_insert(0.0) += -net * 100.0;
+                }
+            }
+        }
+        let mut trimmed: Vec<crate::analysis::OpenPos> = Vec::new();
+        let mut n_secured = 0.0;
         for x in op.iter().filter(|x| x.qty != 0.0 && !covered(x)) {
+            let sec = if x.is_option || x.qty < 0.0 { 0.0 } else { secured.get(&x.symbol).copied().unwrap_or(0.0).min(x.qty) };
+            if sec <= 0.0 {
+                trimmed.push(x.clone());
+                continue;
+            }
+            n_secured += sec;
+            let left = x.qty - sec;
+            if left > 1e-9 {
+                let k = left / x.qty;
+                let mut y = x.clone();
+                y.qty = left;
+                y.market_value *= k;
+                y.cost_basis *= k;
+                y.unrealized_pl *= k;
+                trimmed.push(y);
+            }
+        }
+        let mut un: std::collections::BTreeMap<&str, Vec<&crate::analysis::OpenPos>> = std::collections::BTreeMap::new();
+        for x in &trimmed {
             un.entry(if x.is_option { x.underlying.as_str() } else { x.symbol.as_str() }).or_default().push(x);
         }
         if !un.is_empty() {
@@ -858,9 +900,10 @@ impl<'a> Report<'a> {
                 }
             }
             parts.push(format!(
-                "<figure class=\"card wide\"><h3>Open positions with no closing order</h3><p class=\"sub\">{} position{} no open order would close. Click Unrealized to place a closing order at a chosen profit (for a whole underlying when it is all options, up to 4 legs).</p>{}</figure>",
+                "<figure class=\"card wide\"><h3>Open positions with no closing order</h3><p class=\"sub\">{} position{} no open order would close{}. Click Unrealized to place a closing order at a chosen profit (for a whole underlying when it is all options, up to 4 legs).</p>{}</figure>",
                 n_pos,
                 if n_pos == 1 { "" } else { "s" },
+                if n_secured > 0.0 { format!("; {} share{} securing short calls (100 per contract, held or in open orders) are left out", util::g(n_secured), if n_secured == 1.0 { "" } else { "s" }) } else { String::new() },
                 table(&nt, "t_pos_open", &["Unrealized", "%"])
             ));
         }

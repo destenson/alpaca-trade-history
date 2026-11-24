@@ -4,6 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trading Performance Report</title>
+<script>
+// In-page links ("#positions", "#fillodds") must never navigate: inside the web app the report is a srcdoc
+// frame whose links resolve against the app's own address, so a click that lands before the report's
+// script has set up its handlers (e.g. right after a redraw) would load the app page into the frame.
+document.addEventListener('click', function (e) {
+  var a = e.target.closest && e.target.closest('a[href^="#"]');
+  if (a) e.preventDefault();
+}, true);
+</script>
 <style>
 :root {
   color-scheme: light;

@@ -110,3 +110,7 @@ main:has(#result:not([hidden])) { max-width: 1440px; }
 #ordDlg button.danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 50%, transparent); }
 #ordDlg #ordProfitRow { margin-top: 10px; }
 #ordDlg #ordProfitNote { padding-bottom: 9px; }
+#ordDlg #ordSlRow { margin-top: 10px; }
+#ordDlg #ordSlRow label.slon { padding-bottom: 9px; white-space: nowrap; }
+#ordDlg #ordSlRow input[type=number] { width: 110px; }
+#ordDlg #ordSlNote { margin: 6px 0 0; }
