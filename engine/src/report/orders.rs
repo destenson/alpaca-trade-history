@@ -737,9 +737,20 @@ impl<'a> Report<'a> {
                 .f("Unrealized", super::fm(true, 2))
                 .f("%", super::fp(true, 1))
         };
+        let this_year = chrono::Datelike::year(&self.today());
+        // option contracts as "11/20 1C" (the group row names the underlying), with the year when not this one
+        let short = |sym: &str| match crate::occ::parse_occ(sym) {
+            Some(c) => format!(
+                "{} {}{}",
+                c.expiry.format(if chrono::Datelike::year(&c.expiry) == this_year { "%m/%d" } else { "%m/%d/%y" }),
+                util::g(c.strike),
+                c.right
+            ),
+            None => sym.to_string(),
+        };
         let row = |x: &crate::analysis::OpenPos| {
             vec![
-                Cell::s(&x.symbol),
+                Cell::s(short(&x.symbol)),
                 Cell::F(x.qty),
                 Cell::F(x.avg_price),
                 Cell::F(x.broker_avg_price),
@@ -806,6 +817,52 @@ impl<'a> Report<'a> {
         }
         if let Some(t) = self.closing_orders() {
             parts.push(t);
+        }
+        // positions no open order closes: one collapsible group per underlying
+        let covered = |x: &crate::analysis::OpenPos| orders.iter().any(|o| o.legs.iter().any(|l| l.symbol == x.symbol && (l.ratio > 0.0) != (x.qty > 0.0)));
+        let mut un: std::collections::BTreeMap<&str, Vec<&crate::analysis::OpenPos>> = std::collections::BTreeMap::new();
+        for x in op.iter().filter(|x| x.qty != 0.0 && !covered(x)) {
+            un.entry(if x.is_option { x.underlying.as_str() } else { x.symbol.as_str() }).or_default().push(x);
+        }
+        if !un.is_empty() {
+            let mut nt = mk();
+            let n_pos: usize = un.values().map(|v| v.len()).sum();
+            for (und, xs) in &un {
+                let val: f64 = xs.iter().map(|x| x.market_value).sum();
+                let cost: f64 = xs.iter().map(|x| x.cost_basis).sum();
+                let upl: f64 = xs.iter().map(|x| x.unrealized_pl).sum();
+                if xs.len() == 1 {
+                    // a single position: no group, just its row (named with the underlying)
+                    let mut r = row(xs[0]);
+                    if xs[0].is_option {
+                        r[0] = Cell::s(format!("{} {}", und, short(&xs[0].symbol)));
+                    }
+                    nt.push(r);
+                    continue;
+                }
+                let opts: Vec<(String, f64)> = xs.iter().filter(|x| x.is_option && x.qty.fract() == 0.0).map(|x| (x.symbol.clone(), x.qty)).collect();
+                let tot_upl = if opts.len() == xs.len() && opts.len() <= 4 && !upl.is_nan() {
+                    let (id, refs, _) = super::options::closer(&opts, cost, val, &orders, "2");
+                    Cell::OrderF(upl, id, refs)
+                } else {
+                    Cell::F(upl)
+                };
+                nt.push_grouped(
+                    vec![Cell::s(*und), Cell::s(format!("{} positions", xs.len())), Cell::s(""), Cell::s(""), Cell::s(""), Cell::F(val), Cell::F(cost), tot_upl,
+                         Cell::F(if cost != 0.0 { upl / cost.abs() } else { f64::NAN })],
+                    und,
+                    true,
+                );
+                for x in xs {
+                    nt.push_grouped(row(x), und, false);
+                }
+            }
+            parts.push(format!(
+                "<figure class=\"card wide\"><h3>Open positions with no closing order</h3><p class=\"sub\">{} position{} no open order would close. Click Unrealized to place a closing order at a chosen profit (for a whole underlying when it is all options, up to 4 legs).</p>{}</figure>",
+                n_pos,
+                if n_pos == 1 { "" } else { "s" },
+                table(&nt, "t_pos_open", &["Unrealized", "%"])
+            ));
         }
         self.section("positions", "Positions", parts.concat());
     }
