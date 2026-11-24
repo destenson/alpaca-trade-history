@@ -720,20 +720,26 @@ impl<'a> Report<'a> {
             let sub = format!("Top 3 = {} of {}", pct(top3 / tot, false, 0), money(tot, false, 0));
             parts.push(self.fig("f_conc", data, json!({"yaxis": {"tickformat": ".0%"}, "bargap": 0.3}), 280, "", "Stock concentration (share of long stock value)", &sub, false));
         }
-        let mut tb = Tbl::new(&["Symbol", "Asset", "Qty", "Avg cost (eff.)", "Broker avg", "Price", "Value", "Cost basis", "Unrealized", "%"])
-            .f("Qty", super::fg())
-            .f("Avg cost (eff.)", super::fnum(4))
-            .f("Broker avg", super::fnum(4))
-            .f("Price", super::fnum(4))
-            .f("Value", super::fm(false, 2))
-            .f("Cost basis", super::fm(false, 2))
-            .f("Unrealized", super::fm(true, 2))
-            .f("%", super::fp(true, 1));
         let orders = O::parse_orders(&a.bundle.orders);
-        for x in op {
-            tb.push(vec![
+        let cols = ["Symbol", "Qty", "Avg cost (eff.)", "Broker avg", "Price", "Value", "Cost basis", "Unrealized", "%"];
+        let mk = || {
+            Tbl::new(&cols)
+                .f("Qty", |c| match c {
+                    Cell::S(t) => t.clone(),
+                    c if c.f().is_nan() => String::new(),
+                    c => util::g(c.f()),
+                })
+                .f("Avg cost (eff.)", super::fnum(4))
+                .f("Broker avg", super::fnum(4))
+                .f("Price", super::fnum(4))
+                .f("Value", super::fm(false, 2))
+                .f("Cost basis", super::fm(false, 2))
+                .f("Unrealized", super::fm(true, 2))
+                .f("%", super::fp(true, 1))
+        };
+        let row = |x: &crate::analysis::OpenPos| {
+            vec![
                 Cell::s(&x.symbol),
-                Cell::s(if x.is_option { "option" } else { "stock" }),
                 Cell::F(x.qty),
                 Cell::F(x.avg_price),
                 Cell::F(x.broker_avg_price),
@@ -742,12 +748,62 @@ impl<'a> Report<'a> {
                 Cell::F(x.cost_basis),
                 position_close_cell(x, &orders),
                 Cell::F(x.unrealized_pct),
-            ]);
+            ]
+        };
+        let mut st = mk();
+        for x in op.iter().filter(|x| !x.is_option) {
+            st.push(row(x));
         }
-        parts.push(format!(
-            "<figure class=\"card wide\"><h3>Open positions</h3><p class=\"sub\">Avg cost = fee-inclusive cost basis ÷ quantity from the ledger; “Broker avg” is Alpaca’s figure for comparison.</p>{}</figure>",
-            table(&tb, "t_pos", &["Unrealized", "%"])
-        ));
+        if !st.rows.is_empty() {
+            parts.push(format!(
+                "<figure class=\"card wide\"><h3>Open stock positions</h3><p class=\"sub\">Avg cost = fee-inclusive cost basis ÷ quantity from the ledger; “Broker avg” is Alpaca’s figure for comparison. Click Unrealized to close a position at a chosen profit.</p>{}</figure>",
+                table(&st, "t_pos", &["Unrealized", "%"])
+            ));
+        }
+        // options: one collapsible group per underlying, its total first
+        let mut by: std::collections::BTreeMap<&str, Vec<&crate::analysis::OpenPos>> = std::collections::BTreeMap::new();
+        for x in op.iter().filter(|x| x.is_option) {
+            by.entry(x.underlying.as_str()).or_default().push(x);
+        }
+        if !by.is_empty() {
+            let mut ot = mk();
+            for (und, xs) in &by {
+                let val: f64 = xs.iter().map(|x| x.market_value).sum();
+                let cost: f64 = xs.iter().map(|x| x.cost_basis).sum();
+                let upl: f64 = xs.iter().map(|x| x.unrealized_pl).sum();
+                let n: f64 = xs.iter().map(|x| x.qty.abs()).sum();
+                // the whole underlying's options: close them all at a chosen profit
+                let legs: Vec<(String, f64)> = xs.iter().filter(|x| x.qty.fract() == 0.0).map(|x| (x.symbol.clone(), x.qty)).collect();
+                let tot_upl = if legs.len() == xs.len() && !upl.is_nan() && legs.len() <= 4 {
+                    let (id, refs, _) = super::options::closer(&legs, cost, val, &orders, "1");
+                    Cell::OrderF(upl, id, refs)
+                } else {
+                    Cell::F(upl)
+                };
+                ot.push_grouped(
+                    vec![
+                        Cell::s(*und),
+                        Cell::s(format!("{} contract{} · {} leg{}", util::g(n), if n == 1.0 { "" } else { "s" }, xs.len(), if xs.len() == 1 { "" } else { "s" })),
+                        Cell::s(""),
+                        Cell::s(""),
+                        Cell::s(""),
+                        Cell::F(val),
+                        Cell::F(cost),
+                        tot_upl,
+                        Cell::F(if cost != 0.0 { upl / cost.abs() } else { f64::NAN }),
+                    ],
+                    und,
+                    true,
+                );
+                for x in xs {
+                    ot.push_grouped(row(x), und, false);
+                }
+            }
+            parts.push(format!(
+                "<figure class=\"card wide\"><h3>Open option positions</h3><p class=\"sub\">One row per underlying: ▸ shows its contracts. Prices are per share (× 100 per contract). Click Unrealized to close a contract, or a whole underlying (up to 4 legs), at a chosen profit.</p>{}</figure>",
+                table(&ot, "t_pos_opt", &["Unrealized", "%"])
+            ));
+        }
         if let Some(t) = self.closing_orders() {
             parts.push(t);
         }

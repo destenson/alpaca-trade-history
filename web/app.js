@@ -730,6 +730,20 @@ let refreshing = false;
 // page, re-check orders, positions and quotes (at most every 30 s) and redraw only if something changed.
 // Skipped while the order popup is open or the re-pricing inputs hold edits (a redraw would drop them).
 let lastAutoAt = 0, rpEdited = false;
+// Update once more a minute after the next market open (fresh quotes), whatever the page is doing.
+let openTimer = null;
+function scheduleOpen(clock) {
+  clearTimeout(openTimer);
+  const t = clock && !clock.is_open && Date.parse(clock.next_open || '');
+  if (!t) return;
+  const wait = Math.min(Math.max(t - Date.now(), 0) + 60e3, 2 ** 31 - 1);
+  openTimer = setTimeout(function tick() {
+    if (!lastCreds) return;
+    if (refreshing || $('ordDlg').open || rpEdited) { openTimer = setTimeout(tick, 60e3); return; }   // try again shortly
+    lastAutoAt = 0;
+    refresh(false, true);
+  }, wait);
+}
 function autoRefresh() {
   if (!lastCreds || refreshing || $('result').hidden || $('ordDlg').open || rpEdited) return;
   if (Date.now() - lastAutoAt < 30e3) return;
@@ -761,6 +775,7 @@ async function analyze(creds, force = false, onlyIfChanged = false) {
   lastOrders = bundle.orders || [];
   lastPositions = bundle.positions || [];
   lastCancelled = await recentCancels(new Alpaca(creds), lastOrders);
+  scheduleOpen(bundle.clock);
   const sig = bundleSig(bundle);
   if (onlyIfChanged && sig === lastSig) return null;      // nothing new: keep the report as it is
   lastSig = sig;
