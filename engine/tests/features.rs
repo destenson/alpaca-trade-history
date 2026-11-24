@@ -548,3 +548,38 @@ fn share_report_has_no_account_details() {
     assert!(approx(ss.total_return, sa.total_return) && approx(ss.max_dd, sa.max_dd));
     assert!(approx(ss.ending_equity, 10_000.0 * a.equity.as_ref().unwrap().twr.last().unwrap()));
 }
+
+#[test]
+fn option_strikes_adjusted_for_a_special_dividend() {
+    // COST $30 special dividend: the 1100P/1095P spread becomes 1070P/1065P. Alpaca books each contract out
+    // and its replacement in at the same price (OPCA, one corporate action id); the lots carry over.
+    let fill = |sym: &str, side: &str, px: f64, t: &str| json!({"activity_type": "FILL", "id": format!("f{sym}"), "symbol": sym, "side": side, "qty": "1", "price": px.to_string(), "transaction_time": t, "order_id": "o1", "type": "fill"});
+    let opca = |sym: &str, qty: i64, px: f64, id: &str| json!({"activity_type": "OPCA", "activity_sub_type": "DIV.CDIV", "id": id, "date": "2026-11-24", "created_at": "2026-11-24T07:40:49Z",
+        "symbol": sym, "qty": qty.to_string(), "price": px.to_string(), "net_amount": (-(qty as f64) * px * 100.0).to_string(), "corporate_action_id": "ca1"});
+    let pos = |sym: &str, qty: i64| json!({"symbol": sym, "asset_class": "us_option", "qty": qty.to_string(), "avg_entry_price": "1", "market_value": "100", "cost_basis": "100", "current_price": "1"});
+    let b = json!({
+        "activities": [
+            {"activity_type": "CSD", "id": "d1", "date": "2026-11-01", "net_amount": "5000"},
+            fill("COST261127P01100000", "buy", 10.75, "2026-11-20T15:00:00Z"),
+            fill("COST261127P01095000", "sell", 8.58, "2026-11-20T15:00:00Z"),
+            opca("COST261127P01100000", -1, 10.75, "a1"), opca("COST261127P01070000", 1, 10.75, "a2"),
+            opca("COST261127P01095000", 1, 8.58, "a3"), opca("COST261127P01065000", -1, 8.58, "a4"),
+        ],
+        "positions": [pos("COST261127P01070000", 1), pos("COST261127P01065000", -1)],
+        "bars": {}, "orders": [], "option_snapshots": {}, "stock_snapshots": {},
+    });
+    let a = analyze(&b, &[]);
+    let held: HashMap<String, (f64, f64)> = a.ledger.open_lots.iter().filter(|(_, l)| !l.is_empty())
+        .map(|(s, l)| (s.clone(), (l.iter().map(|x| x.qty).sum(), l[0].price))).collect();
+    assert_eq!(held.len(), 2, "{held:?}");
+    assert_eq!(held["COST261127P01070000"].0, 1.0);
+    assert!((held["COST261127P01070000"].1 - 10.75).abs() < 0.05);
+    assert_eq!(held["COST261127P01065000"].0, -1.0);
+    match a.reconciliation {
+        Some(analysis::Recon::Rows(r)) => assert!(r.is_empty(), "{r:?}"),
+        _ => panic!("no reconciliation"),
+    }
+    // the strategy's legs follow the new strikes, and nothing was realized
+    assert!(a.combos.iter().any(|c| c.legs.contains("1070P") && c.legs.contains("1065P")), "{:?}", a.combos.iter().map(|c| &c.legs).collect::<Vec<_>>());
+    assert!(a.ledger.closed_df().is_empty());
+}

@@ -32,6 +32,9 @@ pub enum Kind {
     Delivery,
     Split,
     Spin,
+    /// option contract adjusted for a corporate action (e.g. strikes cut by a special dividend):
+    /// Alpaca books it as the old contract out and the new one in at the same price
+    OptAdjust,
     TransferIn,
     Flow,
     Fee,
@@ -50,6 +53,7 @@ impl Kind {
             Kind::Delivery => "delivery",
             Kind::Split => "split",
             Kind::Spin => "spin",
+            Kind::OptAdjust => "adjust",
             Kind::TransferIn => "transfer_in",
             Kind::Flow => "flow",
             Kind::Fee => "fee",
@@ -82,6 +86,8 @@ pub struct Event {
     pub gross_price: f64,
     pub fee: f64,
     pub allocated: bool,
+    /// corporate action id (OPCA): pairs the old and new contract
+    pub ca_id: String,
 }
 
 impl Event {
@@ -106,6 +112,7 @@ impl Event {
             gross_price: f64::NAN,
             fee: 0.0,
             allocated: false,
+            ca_id: String::new(),
         }
     }
     pub fn ny_date(&self) -> NaiveDate {
@@ -168,6 +175,12 @@ pub fn normalize(activities: &[Value]) -> Vec<Event> {
             "SPLIT" | "MA" | "NC" | "REORG" => {
                 let mut e = Event::new(i, created.unwrap_or_else(|| close_of(d, 9, 0, 0)), Kind::Split, &sym, qty, price, net, 1.0);
                 e.sub_type = jv::s(a, "activity_sub_type");
+                e
+            }
+            "OPCA" => {
+                let mut e = Event::new(i, created.unwrap_or_else(|| close_of(d, 9, 0, 0)), Kind::OptAdjust, &sym, qty, price, net, 100.0);
+                e.sub_type = jv::s(a, "activity_sub_type");
+                e.ca_id = jv::s(a, "corporate_action_id");
                 e
             }
             "SPIN" => Event::new(i, created.unwrap_or_else(|| close_of(d, 9, 0, 0)), Kind::Spin, &sym, qty, price, net, 1.0),
@@ -546,8 +559,81 @@ pub fn build_ledger(events: Vec<Event>, combo_window_s: f64) -> Ledger {
         }
     }
 
+    // option adjustments: pair each contract taken out with the one put in (same corporate action, price,
+    // right and expiry, opposite quantity); the pair is handled when its first entry comes up
+    let mut adj_pair: HashMap<usize, usize> = HashMap::new();
+    {
+        let idxs: Vec<usize> = (0..events.len()).filter(|&i| events[i].kind == Kind::OptAdjust).collect();
+        let mut used: HashSet<usize> = HashSet::new();
+        for &i in &idxs {
+            if used.contains(&i) {
+                continue;
+            }
+            let (a, ca, ra) = (&events[i], parse_occ(&events[i].symbol), &events[i].ca_id);
+            let m = idxs.iter().copied().find(|&j| {
+                let b = &events[j];
+                let cb = parse_occ(&b.symbol);
+                j != i && !used.contains(&j) && &b.ca_id == ra && b.symbol != a.symbol && (b.qty + a.qty).abs() < EPS && (b.price - a.price).abs() < 1e-6
+                    && matches!((&ca, &cb), (Some(x), Some(y)) if x.right == y.right && x.expiry == y.expiry && x.underlying == y.underlying)
+            });
+            if let Some(j) = m {
+                used.insert(i);
+                used.insert(j);
+                adj_pair.insert(i, j);
+                adj_pair.insert(j, i);
+            }
+        }
+    }
+    let mut adj_done: HashSet<usize> = HashSet::new();
+
     for idx in 0..events.len() {
         let ev = &events[idx];
+        if ev.kind == Kind::OptAdjust {
+            if adj_done.contains(&idx) {
+                continue;
+            }
+            let Some(&j) = adj_pair.get(&idx) else {
+                warnings.push(format!("{} option adjustment {} qty {}: no matching new contract", ev.time.format("%Y-%m-%d"), ev.symbol, plus_g(ev.qty)));
+                continue;
+            };
+            adj_done.insert(idx);
+            adj_done.insert(j);
+            // the old contract is the one whose entry reduces a position held now
+            let (old_i, new_i) = if book.position(&ev.symbol) * ev.qty < 0.0 { (idx, j) } else { (j, idx) };
+            let (old, new) = (events[old_i].symbol.clone(), events[new_i].symbol.clone());
+            let mut q = events[old_i].qty.abs();
+            let mut moved: Vec<Lot> = Vec::new();
+            {
+                let dq = book.get(&old);
+                while q > EPS && !dq.is_empty() {
+                    let take = q.min(dq[0].qty.abs());
+                    let mut part = dq[0].clone();
+                    part.qty = take * dq[0].qty.signum();
+                    if take + EPS >= dq[0].qty.abs() {
+                        dq.pop_front();
+                    } else {
+                        dq[0].qty -= part.qty;
+                    }
+                    q -= take;
+                    moved.push(part);
+                }
+            }
+            if moved.is_empty() {
+                warnings.push(format!("{} option adjustment {} → {}: no open position to carry over", ev.time.format("%Y-%m-%d"), old, new));
+                continue;
+            }
+            // strategies keep their legs, under the new contract
+            for l in &moved {
+                if let Some(cid) = l.combo_id {
+                    let c = &mut combos[cid - 1];
+                    if c.legs.contains_key(&old) {
+                        c.legs = c.legs.iter().map(|(k, v)| (if *k == old { new.clone() } else { k.clone() }, *v)).collect();
+                    }
+                }
+            }
+            book.get(&new).extend(moved);
+            continue;
+        }
         let keys: Vec<String> = pending.keys().cloned().collect();
         for s in keys {
             if s != ev.symbol || ev.kind != Kind::Split {
