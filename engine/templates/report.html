@@ -118,10 +118,13 @@ td .cur { color: var(--muted); margin-right: 0.18em; font-weight: 400; }
 a.tk { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--muted); }
 /* an order's limit price: in the web app it opens the change-price popup; plain text elsewhere */
 button.ord-edit { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; text-align: inherit; }
-.embedded button.ord-edit { cursor: pointer; border-bottom: 1px dotted var(--muted); }
-.embedded button.ord-edit:hover, .embedded button.ord-edit:focus-visible { color: var(--series-1); border-bottom-color: currentColor; }
-.embedded button.ord-edit::after { content: " ✎"; font-size: 0.85em; opacity: 0; }
-.embedded button.ord-edit:hover::after, .embedded button.ord-edit:focus-visible::after { opacity: 0.7; }
+/* clickable prices: a dashed underline and a pencil that are always visible, a tint on hover */
+.embedded button.ord-edit { cursor: pointer; border-radius: 4px; padding: 0 3px; margin: 0 -3px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--series-1) 70%, transparent); }
+.embedded button.ord-edit::after { content: "✎"; margin-left: 4px; font-size: 0.85em; color: var(--series-1); opacity: 0.75; }
+.embedded button.ord-edit:hover, .embedded button.ord-edit:focus-visible {
+  background: color-mix(in srgb, var(--series-1) 14%, transparent); border-bottom-style: solid; }
+.embedded button.ord-edit:hover::after, .embedded button.ord-edit:focus-visible::after { opacity: 1; }
 a.tk:hover, a.tk:focus-visible { color: var(--series-1); border-bottom-color: currentColor; }
 a.tv { text-decoration: none; font-size: 0.85em; margin-left: 0.3em; opacity: 0.6; }
 a.tv:hover, a.tv:focus-visible { opacity: 1; }
