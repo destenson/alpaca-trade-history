@@ -249,12 +249,20 @@ impl<'a> Report<'a> {
         }
         let diff = |c: &Cell| {
             let v = c.f();
-            if v.is_nan() || v.abs() < 1e-9 {
+            let base = if v.is_nan() || v.abs() < 1e-9 {
                 "on plan".to_string()
             } else if v > 0.0 {
                 format!("buy {}", util::g(v))
             } else {
                 format!("{} extra", util::g(-v))
+            };
+            // an open limit buy for the stock already: say so right in the cell
+            match c {
+                Cell::OrderF(_, _, refs) => match serde_json::from_str::<Value>(refs).ok().and_then(|r| r.get("open").and_then(|x| x.as_f64())) {
+                    Some(q) => format!("{} · {} on order", base, util::g(q)),
+                    None => base,
+                },
+                _ => base,
             }
         };
         let mut tb = Tbl::new(&["Underlying", "Closed (W/L)", "Profits from wins", "Shares", "Shares (L)", "Avg cost", "Cash left", "Cash left (L)", "Price now", "Value now", "Gain on shares", "You hold", "Vs. plan"])
@@ -269,9 +277,24 @@ impl<'a> Report<'a> {
             .f("Vs. plan", diff)
             .f("Shares (L)", super::fg())
             .f("Cash left (L)", super::fm(true, 2));
-        // a limit buy of the stock at today's price: N shares from "Vs. plan", 1 share from "Price now"
-        let buy = |r: &crate::reinvest::Row, v: f64, n: f64| -> Cell {
-            if self.share || !r.price_now.is_finite() || r.price_now <= 0.0 || n < 1.0 || !super::is_ticker(&r.underlying) {
+        // a limit buy of the stock at today's price: N shares from "Vs. plan", 1 share from "Price now". When a
+        // limit buy for it is already open, the cells change that order instead (N prefilled from Vs. plan).
+        let orders = if self.share { Vec::new() } else { O::parse_orders(&a.bundle.orders) };
+        let open_buy = |und: &str| {
+            orders.iter().find(|o| !o.is_option && o.order_type == "limit" && o.legs.len() == 1 && o.legs[0].symbol == und && o.legs[0].ratio > 0.0)
+        };
+        let buy = |r: &crate::reinvest::Row, v: f64, n: f64, from_plan: bool| -> Cell {
+            if self.share || !r.price_now.is_finite() || r.price_now <= 0.0 || !super::is_ticker(&r.underlying) {
+                return Cell::F(v);
+            }
+            if let Some(o) = open_buy(&r.underlying) {
+                let mut refs = json!({"label": format!("{} limit buy", r.underlying), "prefill": jr(r.price_now, 4), "open": o.units});
+                if from_plan && n >= 1.0 {
+                    refs["qty"] = json!(n);
+                }
+                return Cell::OrderF(v, o.id.clone(), refs.to_string());
+            }
+            if n < 1.0 {
                 return Cell::F(v);
             }
             let refs = json!({"label": format!("{} shares", r.underlying), "prefill": jr(r.price_now, 4),
@@ -288,11 +311,11 @@ impl<'a> Report<'a> {
                 Cell::F(r.avg_cost),
                 Cell::F(r.cash),
                 Cell::F(r.net_cash),
-                buy(r, r.price_now, 1.0),
+                buy(r, r.price_now, 1.0, false),
                 Cell::F(if r.shares > 0 { r.value } else { f64::NAN }),
                 Cell::F(r.gain),
                 Cell::F(r.held),
-                if r.short_by > 0.0 { buy(r, r.short_by, r.short_by.ceil()) } else { Cell::F(r.short_by) },
+                buy(r, r.short_by, if r.short_by > 0.0 { r.short_by.ceil() } else { 0.0 }, true),
             ]);
         }
         let to_buy: Vec<_> = df.iter().filter(|r| r.short_by > 0.0).collect();

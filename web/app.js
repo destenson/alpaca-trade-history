@@ -1136,8 +1136,12 @@ function openOrderDialog(d, place = false) {
   if (o.synthetic && !o.buyNew) ordCur.closing = true;
   ordCur.buyNew = !!o.buyNew;
   $('ordTif').value = o.time_in_force === 'day' ? 'day' : 'gtc';
-  $('ordQtyRow').hidden = !o.buyNew;
-  if (o.buyNew) $('ordQty').value = String(qty);
+  // shares are editable for a new buy and for an existing stock order (a plan click can prefill N)
+  ordCur.qtyEdit = !!o.buyNew || (!mleg && !isOpt && !o.synthetic && o.type === 'limit' && o.order_class !== 'oco');
+  ordCur.qty0 = qty;
+  $('ordQtyRow').hidden = !ordCur.qtyEdit;
+  const qPre = Number(ref.qty);
+  $('ordQty').value = String(ordCur.qtyEdit && Number.isInteger(qPre) && qPre >= 1 && qPre <= 100000 && !o.buyNew ? qPre : qty);
   ordCur.overlap = o.synthetic && typeof ref.overlap === 'string' ? ref.overlap.slice(0, 300) : '';
   $('ordWhat').textContent = `${label} · ${qty} ${mleg ? (qty === 1 ? 'spread' : 'spreads') : !isOpt ? (qty === 1 ? 'share' : 'shares') : (qty === 1 ? 'contract' : 'contracts')} · ${(o.time_in_force || '').toUpperCase()} · ${o.status}` +
     (lastCreds?.env === 'paper' ? ' · paper account' : ' · LIVE account');
@@ -1226,7 +1230,7 @@ function setOrdMode() {
   $('ordGo').disabled = false;
   $('ordGo').textContent = ordCur?.place ? 'Review new order' : ordCur?.recreate ? 'Review cancel & re-place' : 'Review change';
   $('ordMode').hidden = !ordCur?.recreate;
-  $('ordTitle').textContent = ordCur?.buyNew ? 'New limit buy' : ordCur?.closing ? 'Close this position' : ordCur?.place ? 'Place this order again' : 'Change limit price';
+  $('ordTitle').textContent = ordCur?.buyNew ? 'New limit buy' : ordCur?.closing ? 'Close this position' : ordCur?.place ? 'Place this order again' : ordCur?.qtyEdit ? 'Change order' : 'Change limit price';
 }
 // the same order (legs, quantity, sides, time in force) at a new limit
 function orderBody(o, nl, tif) {
@@ -1335,10 +1339,12 @@ $('ordGo').addEventListener('click', async () => {
   const c = ordCur;
   if (c.killing) setOrdMode();             // the cancel confirmation was showing: start this review afresh
   if ($('ordConfirm').hidden) {           // first click: show exactly what will be sent
-    if (c.buyNew) {                       // the share count is editable for a new buy
+    c.qtyChanged = false;
+    if (c.qtyEdit) {                      // the share count is editable for a new buy or an existing stock order
       const q = Number($('ordQty').value);
       if (!Number.isInteger(q) || q < 1 || q > 100000) { showOrdErr('Enter a whole number of shares.'); return; }
-      c.qty = q; c.order.qty = String(q);
+      c.qty = q;
+      if (c.buyNew) c.order.qty = String(q); else c.qtyChanged = q !== c.qty0;
     }
     c.tif = $('ordTif').value;
     c.tifChanged = !c.place && c.tif !== (c.order.time_in_force === 'day' ? 'day' : 'gtc');
@@ -1355,18 +1361,19 @@ $('ordGo').addEventListener('click', async () => {
     // turning a plain order into an OCO: cancel it and place the OCO (Alpaca can't convert in place)
     c.convert = !!sl && !c.isOco && !c.place;
     c.recreate = c.recreate0 || c.convert;
-    if (nl === c.lim && !c.place && !slChanged && !c.tifChanged) { showOrdErr('That is the current limit and time in force.'); return; }
+    if (nl === c.lim && !c.place && !slChanged && !c.tifChanged && !c.qtyChanged) { showOrdErr('That is the current limit and time in force.'); return; }
     // buying power: the old order's share is released when it is replaced or cancelled
     $('ordGo').disabled = true;
     let bpNote = '';
     try {
       const acct = await new Alpaca(lastCreds).account();
-      const bp = +(c.buyNew ? acct.buying_power : acct.options_buying_power);
-      const need = bpNeed(c, nl), held = c.place ? 0 : (bpNeed(c, c.lim) || 0);
+      const stockBuy = c.mult === 1 && c.order.side === 'buy';
+      const bp = +(stockBuy ? acct.buying_power : acct.options_buying_power);
+      const need = bpNeed(c, nl), held = c.place ? 0 : (bpNeed({ ...c, qty: c.qty0 ?? c.qty }, c.lim) || 0);
       if (Number.isFinite(bp) && need !== null) {
         const avail = bp + held;
         if (need > avail + 0.005) {
-          showOrdErr(`Not enough ${c.buyNew ? '' : 'options '}buying power: at ${dc(nl, c.mleg)} this order needs about ${money2(need)}, ` +
+          showOrdErr(`Not enough ${stockBuy ? '' : 'options '}buying power: at ${dc(nl, c.mleg)} this order needs about ${money2(need)}, ` +
             `and ${money2(avail)} is available` + (held ? ` (${money2(bp)} free + ${money2(held)} this order holds now)` : '') + '. Nothing was sent.');
           $('ordGo').disabled = false;
           return;
@@ -1386,7 +1393,8 @@ $('ordGo').addEventListener('click', async () => {
     const T = c.tif.toUpperCase();
     const tifNote = T === 'DAY' ? ' DAY: cancelled at the end of the session (placed outside market hours, it waits for the next one).'
       : ' GTC: works until filled or cancelled (Alpaca ends it after 90 days).';
-    const tifChg = c.tifChanged ? `; time in force ${(c.order.time_in_force || '').toUpperCase()} → ${T}` : '';
+    const qtyChg = c.qtyChanged ? `; shares ${c.qty0} → ${c.qty}` : '';
+    const tifChg = (c.qtyChanged ? qtyChg : '') + (c.tifChanged ? `; time in force ${(c.order.time_in_force || '').toUpperCase()} → ${T}` : '');
     const units = c.mult === 1 ? c.qty + ' sh' : c.qty + ' × 100';
     $('ordConfirm').textContent = (c.buyNew
       ? `Buy ${c.qty} ${c.order.symbol} with a ${T} limit at ${money2(nl)} (about ${money2(nl * c.qty)} if it fills, before fees).` + tifNote
@@ -1424,9 +1432,10 @@ $('ordGo').addEventListener('click', async () => {
   if (!c.recreate) {
     try {
       let res = null;
-      if (nl !== c.lim || c.tifChanged) {
+      if (nl !== c.lim || c.tifChanged || c.qtyChanged) {
         const body = { limit_price: (nl < 0 ? '-' : '') + fmtPx(c, nl) };
         if (c.tifChanged) body.time_in_force = c.tif;
+        if (c.qtyChanged) body.qty = String(c.qty);
         res = await api.replaceOrder(c.id, body);
       }
       if (c.isOco && c.slChanged && c.stopLeg?.id) {
@@ -1473,7 +1482,9 @@ $('ordGo').addEventListener('click', async () => {
   }
   $('ordGo').textContent = 'Placing…';
   try {
-    const res = await api.placeOrder(c.sl ? ocoBody(c.order, nl, c.sl, c.tif) : orderBody(c.order, nl, c.tif));
+    const nb = c.sl ? ocoBody(c.order, nl, c.sl, c.tif) : orderBody(c.order, nl, c.tif);
+    if (c.qtyChanged) nb.qty = String(c.qty);
+    const res = await api.placeOrder(nb);
     await afterOrderChange(`· ${c.und} order cancelled and placed again${c.convert ? ' as an OCO' : ''} at ${dc(nl, c.mleg)} (Alpaca status: ${res?.status || 'sent'})`);
   } catch (e) {
     // put the original order back at its old price
