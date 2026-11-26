@@ -552,12 +552,12 @@ impl<'a> Report<'a> {
                     "marker": {"color": S[0], "size": 9, "symbol": "circle-open", "line": {"width": 2}}, "hovertemplate": "est. P&L %{y:$,.2f}<extra></extra>"}));
             }
             if let (Some(pos), Some(comb)) = (&cur.position, &cur.combined) {
-                data.push(json!({"type": "scatter", "mode": "lines", "name": "Current position at expiration", "x": super::jraw(&cur.x), "y": super::jraw(pos), "line": {"color": NEUTRAL, "width": 1.5}}));
-                data.push(json!({"type": "scatter", "mode": "lines", "name": "Position + order at expiration", "x": super::jraw(&cur.x), "y": super::jraw(comb), "line": {"color": "var:ink", "width": 2, "dash": "dash"}}));
+                data.push(json!({"type": "scatter", "mode": "lines", "name": "Current position at expiration", "x": super::jraw(&cur.x), "y": super::jraw(pos), "line": {"color": NEUTRAL, "width": 1.5}, "visible": "legendonly", "legendgroup": "pos"}));
+                data.push(json!({"type": "scatter", "mode": "lines", "name": "Position + order at expiration", "x": super::jraw(&cur.x), "y": super::jraw(comb), "line": {"color": "var:ink", "width": 2, "dash": "dash"}, "visible": "legendonly", "legendgroup": "pos"}));
                 if let (Some(m), Some(ct)) = (&model, &cur.combined_today) {
                     if m.pos.is_some() {
                         t_comb = json!(data.len());
-                        data.push(json!({"type": "scatter", "mode": "lines", "name": "Position + order at next open (est.)", "x": super::jraw(&cur.x), "y": super::jraw(ct), "line": {"color": "var:ink", "width": 1.2, "dash": "dot"}}));
+                        data.push(json!({"type": "scatter", "mode": "lines", "name": "Position + order at next open (est.)", "x": super::jraw(&cur.x), "y": super::jraw(ct), "line": {"color": "var:ink", "width": 1.2, "dash": "dot"}, "visible": "legendonly", "legendgroup": "pos"}));
                     }
                 }
             }
@@ -596,7 +596,7 @@ impl<'a> Report<'a> {
         }
         if !views.is_empty() {
             parts.push(format!(
-                "<figure class=\"card wide\"><h3>Payoff if filled</h3><label class=\"pick\">Order <select class=\"interp\" data-box=\"ob\">{}</select></label><div id=\"ob\">{}</div><p class=\"note\">P&amp;L at your limit price, fees excluded. Expiration curves value every leg at intrinsic (later-dated legs of calendars/diagonals are approximated). The dotted curve is the estimated value at {} from the re-pricing inputs. Where you already hold the underlying or options on it, the dashed line shows the whole position after the fill.</p></figure>",
+                "<figure class=\"card wide\"><h3>Payoff if filled</h3><label class=\"pick\">Order <select class=\"interp\" data-box=\"ob\">{}</select></label><div id=\"ob\">{}</div><p class=\"note\">P&amp;L at your limit price, fees excluded. Expiration curves value every leg at intrinsic (later-dated legs of calendars/diagonals are approximated). The dotted curve is the estimated value at {} from the re-pricing inputs. The chart shows only the selected order; where you already hold the underlying or options on it, click “Current position” or “Position + order” in the legend to add your position and the combined result after the fill.</p></figure>",
                 opts.concat(),
                 views.concat(),
                 w

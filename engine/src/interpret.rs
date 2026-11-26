@@ -201,12 +201,8 @@ pub fn evaluate(units: &[&Unit], strategy: &str, spot: f64, today: NaiveDate, xs
     let share_cost: f64 = units.iter().filter(|u| u.symbol == STOCK).map(|u| u.cost).sum();
     let shown = payoff_curves(&legs, spot, today, shares, share_cost, xs);
     let risk = payoff_curves(&legs, spot, today, shares, share_cost, risk_xs);
-    let y = &risk.expiry;
-    let slope_hi = y[y.len() - 1] - y[y.len() - 2];
-    let ymax = y.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let ymin = y.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max_gain = if slope_hi > 1e-6 { f64::INFINITY } else { ymax };
-    let max_loss = if slope_hi < -1e-6 { f64::NEG_INFINITY } else { ymin };
+    // exact, from the strikes (see optmath::exact_expiry)
+    let (max_gain, max_loss) = (risk.max_profit, risk.max_loss);
     let mut greeks = Greeks::default();
     for u in units {
         greeks.add(&u.greeks);
@@ -233,7 +229,15 @@ pub fn grid(units: &[&Unit], spot: f64) -> (Vec<f64>, Vec<f64>) {
     strikes.push(spot);
     let lo = strikes.iter().cloned().fold(f64::INFINITY, f64::min) * 0.85;
     let hi = strikes.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    (linspace(lo, hi * 1.15, 241), linspace(0.01, hi * 3.0, 1201))
+    // the payoff bends only at strikes: put every strike on both grids so the corners are drawn exactly
+    let with_strikes = |mut v: Vec<f64>| {
+        let (a, b) = (v[0], v[v.len() - 1]);
+        v.extend(strikes.iter().copied().filter(|k| *k > a && *k < b));
+        v.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        v.dedup_by(|x, y| (*x - *y).abs() < 1e-9);
+        v
+    };
+    (with_strikes(linspace(lo, hi * 1.15, 241)), with_strikes(linspace(0.01, hi * 3.0, 1201)))
 }
 
 #[derive(Clone, Debug)]

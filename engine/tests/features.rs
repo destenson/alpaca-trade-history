@@ -583,3 +583,26 @@ fn option_strikes_adjusted_for_a_special_dividend() {
     assert!(a.combos.iter().any(|c| c.legs.contains("1070P") && c.legs.contains("1065P")), "{:?}", a.combos.iter().map(|c| &c.legs).collect::<Vec<_>>());
     assert!(a.ledger.closed_df().is_empty());
 }
+
+#[test]
+fn expiry_payoff_is_solved_exactly() {
+    use alpaca_engine::optmath::{exact_expiry, LegIn};
+    let leg = |sym: &str, qty: f64, cost: f64| LegIn { symbol: sym.into(), qty, cost, iv: None };
+    // inverted iron condor for a $2.00 credit: profit below 47 and above 50, exactly $0 in between
+    let (be, z, mx, mn) = exact_expiry(&[leg("CRWV261211C00046000", -1.0, -300.0), leg("CRWV261211C00047000", 1.0, 50.0),
+        leg("CRWV261211P00050000", 1.0, 50.0), leg("CRWV261211P00051000", -1.0, -0.0)], 0.0, 0.0);
+    assert!(be.is_empty(), "{be:?}");
+    assert_eq!(z, vec![(f64::NEG_INFINITY, 47.0), (50.0, f64::INFINITY)]);
+    assert!((mx - 100.0).abs() < 1e-9 && mn.abs() < 1e-9, "{mx} {mn}");
+    // the 83/84 call + 84.5/85 put debit pair at $0.05: profits everywhere, 4 corners, 45 to 145
+    let (be, z, mx, mn) = exact_expiry(&[leg("ANT261204C00083000", 1.0, 5.0), leg("ANT261204C00084000", -1.0, 0.0),
+        leg("ANT261204P00085000", 1.0, 0.0), leg("ANT261204P00084500", -1.0, 0.0)], 0.0, 0.0);
+    assert!(be.is_empty());
+    assert_eq!(z, vec![(f64::NEG_INFINITY, f64::INFINITY)]);
+    assert!((mx - 145.0).abs() < 1e-9 && (mn - 45.0).abs() < 1e-9, "{mx} {mn}");
+    // a long call: one breakeven at strike + premium, unlimited upside
+    let (be, z, mx, mn) = exact_expiry(&[leg("AURA270416C00007000", 1.0, 5.0)], 0.0, 0.0);
+    assert_eq!(be, vec![7.05]);
+    assert_eq!(z, vec![(7.05, f64::INFINITY)]);
+    assert!(mx.is_infinite() && (mn + 5.0).abs() < 1e-9);
+}
