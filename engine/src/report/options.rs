@@ -269,6 +269,15 @@ impl<'a> Report<'a> {
             .f("Vs. plan", diff)
             .f("Shares (L)", super::fg())
             .f("Cash left (L)", super::fm(true, 2));
+        // a limit buy of the stock at today's price: N shares from "Vs. plan", 1 share from "Price now"
+        let buy = |r: &crate::reinvest::Row, v: f64, n: f64| -> Cell {
+            if self.share || !r.price_now.is_finite() || r.price_now <= 0.0 || n < 1.0 || !super::is_ticker(&r.underlying) {
+                return Cell::F(v);
+            }
+            let refs = json!({"label": format!("{} shares", r.underlying), "prefill": jr(r.price_now, 4),
+                "buy": {"symbol": r.underlying, "qty": n}});
+            Cell::OrderF(v, format!("buy:{}", r.underlying), refs.to_string())
+        };
         for r in &df {
             tb.push(vec![
                 Cell::s(&r.underlying),
@@ -279,11 +288,11 @@ impl<'a> Report<'a> {
                 Cell::F(r.avg_cost),
                 Cell::F(r.cash),
                 Cell::F(r.net_cash),
-                Cell::F(r.price_now),
+                buy(r, r.price_now, 1.0),
                 Cell::F(if r.shares > 0 { r.value } else { f64::NAN }),
                 Cell::F(r.gain),
                 Cell::F(r.held),
-                Cell::F(r.short_by),
+                if r.short_by > 0.0 { buy(r, r.short_by, r.short_by.ceil()) } else { Cell::F(r.short_by) },
             ]);
         }
         let to_buy: Vec<_> = df.iter().filter(|r| r.short_by > 0.0).collect();

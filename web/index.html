@@ -116,6 +116,9 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
   <h3 id="ordTitle">Change limit price</h3>
   <p id="ordWhat" class="ordwhat"></p>
   <p id="ordRefs" class="muted"></p>
+  <div class="ordrow" id="ordQtyRow" hidden>
+    <label>Shares<input id="ordQty" type="number" step="1" min="1" inputmode="numeric" autocomplete="off"></label>
+  </div>
   <div class="ordrow">
     <label>New limit (per spread)<input id="ordPx" type="number" step="0.01" min="0" inputmode="decimal" autocomplete="off"></label>
     <label id="ordSideL">&nbsp;<select id="ordSide"><option value="debit">debit</option><option value="credit">credit</option></select></label>
