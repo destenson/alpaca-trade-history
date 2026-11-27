@@ -671,16 +671,16 @@ let reports = null;
 
 let lastCreds = null;     // kept in memory for this tab only, so Refresh needs no re-entry
 let currentView = 'full';
-let currentTab = null;    // report tab the viewer is on (reported by the frame)
-// the reader's scroll position per report tab (the frame reports it), restored after every redraw
-const frameScroll = {};
+let currentTab = null;    // report tab the viewer is on
+let rep = null;           // the shown report's controls, from its own script
+let resumeY = 0;          // scroll position to come back to after a reload for a new version
 try {                     // restored after an automatic reload for a new version
   const keep = JSON.parse(sessionStorage.getItem('aa-resume') || 'null');
   sessionStorage.removeItem('aa-resume');
   if (keep) {
     currentTab = /^[a-z]{1,30}$/.test(keep.tab || '') ? keep.tab : null;
     currentView = keep.view === 'share' ? 'share' : 'full';
-    if (currentTab && Number.isFinite(keep.y)) frameScroll[currentTab] = keep.y;
+    if (Number.isFinite(keep.y)) resumeY = Math.max(0, keep.y);
   }
 } catch (e) { /* storage unavailable */ }
 
@@ -697,7 +697,7 @@ async function newerBuild() {
   } catch (e) { return false; }
 }
 function reloadForUpdate() {
-  try { sessionStorage.setItem('aa-resume', JSON.stringify({ tab: currentTab, view: currentView, y: frameScroll[currentTab] || 0 })); } catch (e) { /* ignore */ }
+  try { sessionStorage.setItem('aa-resume', JSON.stringify({ tab: currentTab, view: currentView, y: Math.round(scrollY) })); } catch (e) { /* ignore */ }
   location.reload();
 }
 let reloadWhenIdle = false;
@@ -708,7 +708,7 @@ async function checkForUpdate() {
   st.classList.remove('err');
   if (!$('lock').hidden) {              // kept unlocked: the reload reopens the report by itself
     // never while the reader is busy: an order popup open, or re-pricing edits; reload once they're done
-    if ($('ordDlg').open || rpEdited) {
+    if ($('ordDlg').open || rpEdited()) {
       st.textContent = '· A new version is live: it loads when you close the order popup.';
       reloadWhenIdle = true;
       return true;
@@ -742,7 +742,8 @@ let refreshing = false;
 
 // Keep the report current without a manual Refresh: on switching report tabs or coming back to the page, re-check orders, positions and quotes (at most every 30 s) and redraw only if something changed.
 // Skipped while the order popup is open or the re-pricing inputs hold edits (a redraw would drop them).
-let lastAutoAt = 0, rpEdited = false;
+let lastAutoAt = 0;
+const rpEdited = () => Boolean(rep && rep.edited());
 // Update once more a minute after the next market open (fresh quotes), whatever the page is doing.
 let openTimer = null;
 function scheduleOpen(clock) {
@@ -752,13 +753,13 @@ function scheduleOpen(clock) {
   const wait = Math.min(Math.max(t - Date.now(), 0) + 60e3, 2 ** 31 - 1);
   openTimer = setTimeout(function tick() {
     if (!lastCreds) return;
-    if (refreshing || $('ordDlg').open || rpEdited) { openTimer = setTimeout(tick, 60e3); return; }   // try again shortly
+    if (refreshing || $('ordDlg').open || rpEdited()) { openTimer = setTimeout(tick, 60e3); return; }   // try again shortly
     lastAutoAt = 0;
     refresh(false, true);
   }, wait);
 }
 function autoRefresh() {
-  if (!lastCreds || refreshing || $('result').hidden || $('ordDlg').open || rpEdited) return;
+  if (!lastCreds || refreshing || $('result').hidden || $('ordDlg').open || rpEdited()) return;
   if (Date.now() - lastAutoAt < 30e3) return;
   refresh(false, true);
 }
@@ -803,7 +804,7 @@ async function analyze(creds, force = false, onlyIfChanged = false) {
 function applyResult(out) {
   reports = out;
   renderCancelled();
-  swapIn(reports[currentView]);
+  render(reports[currentView]);
   const s = out.summary;
   $('summary').innerHTML = s
     ? `<b>${fmtMoney(s.equity)}</b> equity · P&amp;L <b>${fmtMoney(s.pnl, true)}</b> · time-weighted <b>${fmtPct(s.twr)}</b> · max drawdown <b>${fmtPct(s.max_dd)}</b>`
@@ -831,9 +832,9 @@ async function run(creds) {
     lastAutoAt = Date.now();
     step('Done.');
     currentStep.classList.replace('active', 'done');
-    applyResult(out);
     $('progress').hidden = true;
     $('result').hidden = false;
+    applyResult(out);
   } catch (e) {
     console.error(e);
     $('error').textContent = e.message || String(e);
@@ -875,7 +876,7 @@ async function refresh(force = false, auto = false) {
 
 function show(which) {
   currentView = which;
-  $('frame').srcdoc = reports[which];
+  render(reports[which]);
   $('viewFull').classList.toggle('on', which === 'full');
   $('viewShare').classList.toggle('on', which === 'share');
 }
@@ -894,149 +895,95 @@ const fmtMoney = (v, signed) => (v < 0 ? '−' : signed && v > 0 ? '+' : '') + '
 const fmtPct = (v) => (v < 0 ? '−' : '+') + Math.abs(v * 100).toFixed(1) + '%';
 
 // ------------------------------------------------------------------------------- theme
-// The page owns the theme and pushes it into the report frame; the report's own Theme button asks the
-// page to switch. Messages carry only a theme name and are accepted only from our own frame.
 const THEME_KEY = 'alpaca-analyzer.theme';
 const darkMQ = matchMedia('(prefers-color-scheme: dark)');
 const effectiveTheme = () => document.documentElement.dataset.theme || (darkMQ.matches ? 'dark' : 'light');
 
-function syncFrameTheme() {
-  const w = $('frame').contentWindow;
-  if (w) w.postMessage({ type: 'aa-set-theme', theme: effectiveTheme() }, '*');
-}
-
 function setTheme(t) {
   document.documentElement.dataset.theme = t;
   try { localStorage.setItem(THEME_KEY, t); } catch (e) { /* storage unavailable */ }
-  syncFrameTheme();
+  if (rep) rep.retheme();
 }
 
 $('themeBtn').addEventListener('click', () => setTheme(effectiveTheme() === 'dark' ? 'light' : 'dark'));
-darkMQ.addEventListener('change', syncFrameTheme);
-$('frame').addEventListener('load', syncFrameTheme);
 // charts the viewer switched to log scale (ids only), restored into every report
 const LOG_STORE = 'alpaca-analyzer.logcharts';
 function logCharts() {
   try { return (JSON.parse(localStorage.getItem(LOG_STORE) || '[]') || []).filter((x) => typeof x === 'string'); }
   catch (_) { return []; }
 }
-// A refreshed report replaces the shown one without a visible reload: it loads in a second frame laid over
-// the first but hidden, takes over the reader's view (tab, scroll, readings, sorting, expanded groups,
-// re-pricing edits), and only then is swapped in.
-let pending = null, stateWaiter = null;
-function askState(win) {
-  return new Promise((res) => {
-    const t = setTimeout(() => { stateWaiter = null; res(null); }, 600);
-    stateWaiter = (s) => { clearTimeout(t); stateWaiter = null; res(s); };
-    win.postMessage({ type: 'aa-get-state' }, '*');
+
+// ------------------------------------------------------------------------------- the report
+// The engine's report is drawn straight into this page (#report): its markup goes in the box, its rules are
+// scoped to the box, and its script runs on the box. A redraw replaces the box's content in one task, after
+// taking the reader's view (scroll, readings, sorting, expanded groups, re-pricing edits) from the old one,
+// so the page never flashes or loses its place.
+window.AA_EMBED = true;              // the report's script must not start itself on this page's body
+const host = {
+  startTab: () => currentTab,
+  onTab(id) {
+    const switched = currentTab !== id;
+    currentTab = id;
+    if (switched) autoRefresh();
+  },
+  editOrder: (d) => openOrderDialog(d),
+  theme: (t) => setTheme(t),
+  logIds: logCharts,
+  log(id, on) {
+    const ids = new Set(logCharts());
+    if (on) ids.add(id); else ids.delete(id);
+    try { localStorage.setItem(LOG_STORE, JSON.stringify([...ids])); } catch (_) { /* storage unavailable */ }
+  },
+};
+const plotlyLoads = {};
+function loadScript(src, integrity) {
+  return plotlyLoads[src] ||= new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src;
+    if (integrity) s.integrity = integrity;
+    s.crossOrigin = 'anonymous';
+    s.onload = res;
+    s.onerror = () => { delete plotlyLoads[src]; rej(new Error('Could not load the chart library')); };
+    document.head.append(s);
   });
 }
-async function swapIn(html) {
-  const old = $('frame');
-  if (!old.srcdoc || $('result').hidden) { old.srcdoc = html; return; }
-  const state = await askState(old.contentWindow);
-  if (pending) { clearTimeout(pending.timer); pending.frame.remove(); }
-  const nf = old.cloneNode(false);
-  nf.removeAttribute('id');
-  Object.assign(nf.style, { position: 'absolute', left: old.offsetLeft + 'px', top: old.offsetTop + 'px', width: old.offsetWidth + 'px',
-    height: old.offsetHeight + 'px', visibility: 'hidden', pointerEvents: 'none' });
-  nf.srcdoc = html;
-  old.after(nf);
-  pending = { frame: nf, state: state || { y: frameScroll[currentTab || ''] || 0 }, timer: setTimeout(finishSwap, 6000) };
+function styleEl(id) {
+  let el = document.getElementById(id);
+  if (!el) { el = document.createElement('style'); el.id = id; document.head.append(el); }
+  return el;
 }
-function finishSwap() {
-  if (!pending) return;
-  const nf = pending.frame;
-  clearTimeout(pending.timer);
-  pending = null;
-  const old = $('frame');
-  nf.removeAttribute('style');
-  old.remove();
-  nf.id = 'frame';
+let renderSeq = 0;
+async function render(html) {
+  const seq = ++renderSeq;
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const lib = doc.querySelector('script[src]');
+  if (lib) await loadScript(lib.getAttribute('src'), lib.getAttribute('integrity')).catch((e) => console.error(e));
+  if (seq !== renderSeq) return;                    // a newer report arrived meanwhile
+  const code = doc.getElementById('aa-script')?.textContent || '';
+  const tokens = doc.getElementById('aa-tokens')?.textContent || '';
+  const css = '@scope (#report) {\n' + (doc.getElementById('aa-css')?.textContent || '') + '\n}';
+  doc.querySelectorAll('script:not([type="application/json"])').forEach((x) => x.remove());
+  // from here on synchronous: nothing is painted between taking the old report down and drawing the new one
+  const box = $('report');
+  const state = rep ? rep.captureState() : (resumeY > 0 ? { y: resumeY } : null);
+  resumeY = 0;
+  if (rep) { rep.destroy(); rep = null; }
+  if (styleEl('report-tokens').textContent !== tokens) styleEl('report-tokens').textContent = tokens;
+  if (styleEl('report-css').textContent !== css) styleEl('report-css').textContent = css;
+  box.className = '';
+  box.replaceChildren(...doc.body.childNodes);
+  const s = document.createElement('script');      // defines aaReport()
+  s.textContent = code;
+  document.head.append(s);
+  s.remove();
+  if (typeof window.aaReport !== 'function') return;
+  rep = window.aaReport(box, host);
+  if (state) {
+    try { rep.applyState(state); } catch (e) { console.error(e); }
+    // again once lazily drawn charts have their size
+    if (state.y > 0) for (const t of [300, 900]) setTimeout(() => { if (Math.abs(scrollY - state.y) > 2 && scrollY < 5) scrollTo(0, state.y); }, t);
+  }
 }
-window.addEventListener('message', (e) => {
-  if (!e.data || typeof e.data !== 'object') return;
-  if (pending && e.source === pending.frame.contentWindow) {     // the new report, still hidden
-    const w = pending.frame.contentWindow;
-    if (e.data.type === 'aa-ready') {
-      w.postMessage({ type: 'aa-set-theme', theme: effectiveTheme() }, '*');
-      if (currentTab) w.postMessage({ type: 'aa-set-tab', tab: currentTab }, '*');
-      const ids = logCharts();
-      if (ids.length) w.postMessage({ type: 'aa-set-log', ids }, '*');
-      w.postMessage({ type: 'aa-apply-state', state: pending.state }, '*');
-    }
-    if (e.data.type === 'aa-applied') setTimeout(finishSwap, 120);
-    return;
-  }
-  if (e.source !== $('frame').contentWindow) return;
-  if (e.data.type === 'aa-state' && stateWaiter) stateWaiter(e.data.state && typeof e.data.state === 'object' ? e.data.state : null);
-  if (e.data.type === 'aa-ready') {
-    syncFrameTheme();
-    if (currentTab) $('frame').contentWindow.postMessage({ type: 'aa-set-tab', tab: currentTab }, '*');
-    // a redrawn report goes back to where the reader was on that tab
-    const y = frameScroll[currentTab || ''];
-    if (y > 0) $('frame').contentWindow.postMessage({ type: 'aa-set-scroll', y }, '*');
-    const ids = logCharts();
-    if (ids.length) $('frame').contentWindow.postMessage({ type: 'aa-set-log', ids }, '*');
-  }
-  if (e.data.type === 'aa-scroll' && Number.isFinite(e.data.y) && typeof e.data.tab === 'string' && /^[a-z]{1,30}$/.test(e.data.tab)) {
-    frameScroll[e.data.tab] = Math.max(0, Math.min(e.data.y, 1e7));
-  }
-  if (e.data.type === 'aa-log' && typeof e.data.id === 'string' && /^f_[a-z0-9_]{1,40}$/.test(e.data.id)) {
-    const ids = new Set(logCharts());
-    if (e.data.on) ids.add(e.data.id); else ids.delete(e.data.id);
-    try { localStorage.setItem(LOG_STORE, JSON.stringify([...ids])); } catch (_) { /* storage unavailable */ }
-  }
-  if (e.data.type === 'aa-tab' && typeof e.data.tab === 'string' && /^[a-z]{1,30}$/.test(e.data.tab)) {
-    const switched = currentTab !== e.data.tab;
-    currentTab = e.data.tab;
-    rpEdited = e.data.edited === true;
-    if (switched) autoRefresh();
-  }
-  if (e.data.type === 'aa-theme' && (e.data.theme === 'light' || e.data.theme === 'dark')) setTheme(e.data.theme);
-  if (e.data.type === 'aa-tv') showChart(e.data);
-  if (e.data.type === 'aa-edit-order') openOrderDialog(e.data);
-  if (e.data.type === 'aa-tv-hide') hideChartSoon();
-});
-
-// TradingView mini chart for a ticker's chart icon in the report. Drawn here, over the report frame, because
-// the sandboxed frame has no origin and TradingView's data connection refuses it. Only a symbol and the
-// icon's position come from the frame; both are validated.
-let chartPop = null, chartHideT = null;
-function showChart(d) {
-  const r = d.rect || {};
-  if (typeof d.symbol !== 'string' || !/^([A-Z]{2,8}:)?[A-Z0-9.]{1,10}$/.test(d.symbol)) return;
-  if (!['left', 'top', 'right', 'bottom'].every((k) => Number.isFinite(r[k]))) return;
-  clearTimeout(chartHideT);
-  if (!chartPop) {
-    chartPop = document.createElement('div');
-    chartPop.id = 'tvpop';
-    chartPop.addEventListener('mouseenter', () => clearTimeout(chartHideT));
-    chartPop.addEventListener('mouseleave', hideChartSoon);
-    document.body.append(chartPop);
-  }
-  if (chartPop.dataset.symbol !== d.symbol || chartPop.hidden) {
-    const cfg = { symbol: d.symbol, width: '100%', height: '100%', locale: 'en', dateRange: '3M',
-      colorTheme: d.theme === 'dark' ? 'dark' : 'light', isTransparent: false, autosize: true, largeChartUrl: '' };
-    const f = document.createElement('iframe');
-    f.title = d.symbol + ' chart (TradingView)';
-    f.referrerPolicy = 'no-referrer';
-    f.src = 'https://www.tradingview-widget.com/embed-widget/mini-symbol-overview/?locale=en#' + encodeURIComponent(JSON.stringify(cfg));
-    chartPop.replaceChildren(f);
-    chartPop.dataset.symbol = d.symbol;
-  }
-  chartPop.hidden = false;
-  const fr = $('frame').getBoundingClientRect();
-  const w = chartPop.offsetWidth, h = chartPop.offsetHeight;
-  const left = fr.left + r.left, top = fr.top + r.top, bottom = fr.top + r.bottom;
-  chartPop.style.left = Math.max(8, Math.min(left, innerWidth - w - 8)) + 'px';
-  chartPop.style.top = (bottom + h + 12 < innerHeight ? bottom + 6 : Math.max(8, top - h - 6)) + 'px';
-}
-function hideChartSoon() {
-  clearTimeout(chartHideT);
-  chartHideT = setTimeout(() => { if (chartPop) { chartPop.hidden = true; chartPop.replaceChildren(); delete chartPop.dataset.symbol; } }, 250);
-}
-addEventListener('scroll', () => { if (chartPop && !chartPop.hidden) hideChartSoon(); }, { passive: true });
 
 // ------------------------------------------------------------------------------ wiring
 $('origin').textContent = location.origin;
@@ -1119,7 +1066,7 @@ if (rec && rec.enc) {
 if ('requestIdleCallback' in window) requestIdleCallback(() => loadEngine().catch(() => { engineReady = null; }));
 
 // ------------------------------------------------------------------------- change an order's limit price
-// Opened from a limit price in the report. The frame only names the order and passes reference prices to
+// Opened from a limit price in the report. The report only names the order and passes reference prices to
 // show; everything that is sent (which order, its legs and quantity, the old price) comes from the order as
 // Alpaca returned it. Nothing is sent before the second, explicit confirmation.
 const NOT_REPLACEABLE = { accepted: 'accepted (queued, not yet at the exchange)', pending_new: 'pending new',
@@ -1137,7 +1084,7 @@ function legText(o) {
   }).join(', ');
 }
 // A new order closing an open option position, from the report's "All option strategies" P&L. Every leg
-// must close (part of) a position Alpaca lists, so the frame can't ask for anything else.
+// must close (part of) a position Alpaca lists, so the report can't ask for anything else.
 function closingOrderFrom(n) {
   if (!n || typeof n !== 'object' || !Array.isArray(n.legs) || !n.legs.length || n.legs.length > 4) return null;
   const qty = n.qty;
@@ -1388,7 +1335,7 @@ $('ordKill').addEventListener('click', async () => {
 });
 $('ordCancel').addEventListener('click', () => $('ordDlg').close());
 $('ordDlg').addEventListener('close', () => {
-  if (reloadWhenIdle && !rpEdited) setTimeout(() => { if (!$('ordDlg').open) checkForUpdate(); }, 1500);
+  if (reloadWhenIdle && !rpEdited()) setTimeout(() => { if (!$('ordDlg').open) checkForUpdate(); }, 1500);
 });
 async function afterOrderChange(msg, err) {
   $('ordDlg').close();
