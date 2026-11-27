@@ -95,7 +95,6 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
         <div id="summary" class="summary"></div>
         <div class="muted"><span id="updated"></span> <span id="refreshStatus" role="status" aria-live="polite"></span>
           <button type="button" id="refreshAll" class="linkbtn" hidden title="Ignore the saved copy and download all history again">Re-download everything</button></div>
-        <div id="cancelled" class="muted cancelled" hidden></div>
       </div>
       <div class="actions">
         <div class="seg" role="tablist">
@@ -110,6 +109,7 @@ try { const t = localStorage.getItem('alpaca-analyzer.theme'); if (t === 'light'
       </div>
     </div>
     <iframe id="frame" class="rframe" title="Report" sandbox="allow-scripts allow-downloads allow-popups allow-popups-to-escape-sandbox"></iframe>
+    <div id="cancelled" class="cancelled" hidden><h3>Cancelled in the last day</h3><ul></ul></div>
   </section>
 </main>
 <dialog id="ordDlg" aria-labelledby="ordTitle">

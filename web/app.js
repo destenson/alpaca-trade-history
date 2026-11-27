@@ -1580,22 +1580,20 @@ async function recentCancels(api, open) {
   } catch (_) { return []; }
 }
 function renderCancelled() {
-  const box = $('cancelled');
-  box.textContent = '';
+  const box = $('cancelled'), list = box.querySelector('ul');
+  list.textContent = '';
   box.hidden = !lastCancelled.length;
   if (!lastCancelled.length) return;
-  box.append('Cancelled in the last day: ');
-  lastCancelled.forEach((o, i) => {
+  lastCancelled.forEach((o) => {
     const und = (OCC.exec((o.legs?.[0] || o).symbol) || [])[1];
     const mleg = o.order_class === 'mleg';
     const lim = +o.limit_price;
-    const span = document.createElement('span');
-    span.className = 'cxl';
-    span.textContent = `${i ? ' · ' : ''}${und} ${o.qty}× ${legText(o)} at ${dc(mleg ? lim : (o.side === 'sell' ? -lim : lim), true)} ${(o.time_in_force || '').toUpperCase()} `;
+    const span = document.createElement('li');
+    span.textContent = `${und} ${o.qty}× ${legText(o)} at ${dc(mleg ? lim : (o.side === 'sell' ? -lim : lim), true)} ${(o.time_in_force || '').toUpperCase()} `;
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'linkbtn'; b.textContent = 'Re-place…';
     b.onclick = () => openOrderDialog({ id: o.id, ref: {} }, true);
     span.append(b);
-    box.append(span);
+    list.append(span);
   });
 }

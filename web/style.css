@@ -104,8 +104,10 @@ main:has(#result:not([hidden])) { max-width: 1440px; }
 #ordDlg .ordconfirm { margin: 14px 0 0; padding: 10px 12px; border-radius: 8px; font-size: 13.5px;
   background: color-mix(in srgb, var(--accent) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
 #ordDlg .ordbtns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
-.cancelled { margin-top: 4px; }
-.cancelled .cxl { white-space: nowrap; }
+.cancelled { margin: 16px 0 0; font-size: 13.5px; }
+.cancelled h3 { font-size: 14px; margin: 0 0 6px; }
+.cancelled ul { margin: 0; padding-left: 20px; }
+.cancelled li { margin: 3px 0; }
 #ordDlg .ordbtns .grow { flex: 1; }
 #ordDlg button.danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 50%, transparent); }
 #ordDlg #ordProfitRow { margin-top: 10px; }
