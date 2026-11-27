@@ -672,10 +672,16 @@ let reports = null;
 let lastCreds = null;     // kept in memory for this tab only, so Refresh needs no re-entry
 let currentView = 'full';
 let currentTab = null;    // report tab the viewer is on (reported by the frame)
+// the reader's scroll position per report tab (the frame reports it), restored after every redraw
+const frameScroll = {};
 try {                     // restored after an automatic reload for a new version
   const keep = JSON.parse(sessionStorage.getItem('aa-resume') || 'null');
   sessionStorage.removeItem('aa-resume');
-  if (keep) { currentTab = /^[a-z]{1,30}$/.test(keep.tab || '') ? keep.tab : null; currentView = keep.view === 'share' ? 'share' : 'full'; }
+  if (keep) {
+    currentTab = /^[a-z]{1,30}$/.test(keep.tab || '') ? keep.tab : null;
+    currentView = keep.view === 'share' ? 'share' : 'full';
+    if (currentTab && Number.isFinite(keep.y)) frameScroll[currentTab] = keep.y;
+  }
 } catch (e) { /* storage unavailable */ }
 
 // ------------------------------------------------------------------ new deployments
@@ -691,7 +697,7 @@ async function newerBuild() {
   } catch (e) { return false; }
 }
 function reloadForUpdate() {
-  try { sessionStorage.setItem('aa-resume', JSON.stringify({ tab: currentTab, view: currentView })); } catch (e) { /* ignore */ }
+  try { sessionStorage.setItem('aa-resume', JSON.stringify({ tab: currentTab, view: currentView, y: frameScroll[currentTab] || 0 })); } catch (e) { /* ignore */ }
   location.reload();
 }
 async function checkForUpdate() {
@@ -714,20 +720,20 @@ async function checkForUpdate() {
 }
 // backup for a tab left open: look for a new version every few minutes (reloads by itself when it can)
 setInterval(() => { if (!$('result').hidden) checkForUpdate(); }, 5 * 60e3);
-document.addEventListener('visibilitychange', async () => {
-  if (document.visibilityState === 'visible' && !$('result').hidden && !(await checkForUpdate())) autoRefresh();
+// coming back to the page only checks for a new version of the app (no data refresh)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && !$('result').hidden) checkForUpdate();
 });
 // switching back from another window (not another tab) only fires focus
 let lastFocusCheck = 0;
 window.addEventListener('focus', () => {
   if ($('result').hidden || Date.now() - lastFocusCheck < 30e3) return;
   lastFocusCheck = Date.now();
-  checkForUpdate().then((upd) => { if (!upd) autoRefresh(); });
+  checkForUpdate();
 });
 let refreshing = false;
 
-// Keep the report current without a manual Refresh: on switching report tabs or coming back to the
-// page, re-check orders, positions and quotes (at most every 30 s) and redraw only if something changed.
+// Keep the report current without a manual Refresh: on switching report tabs, re-check orders, positions and quotes (at most every 30 s) and redraw only if something changed.
 // Skipped while the order popup is open or the re-pricing inputs hold edits (a redraw would drop them).
 let lastAutoAt = 0, rpEdited = false;
 // Update once more a minute after the next market open (fresh quotes), whatever the page is doing.
@@ -912,8 +918,14 @@ window.addEventListener('message', (e) => {
   if (e.data.type === 'aa-ready') {
     syncFrameTheme();
     if (currentTab) $('frame').contentWindow.postMessage({ type: 'aa-set-tab', tab: currentTab }, '*');
+    // a redrawn report goes back to where the reader was on that tab
+    const y = frameScroll[currentTab || ''];
+    if (y > 0) $('frame').contentWindow.postMessage({ type: 'aa-set-scroll', y }, '*');
     const ids = logCharts();
     if (ids.length) $('frame').contentWindow.postMessage({ type: 'aa-set-log', ids }, '*');
+  }
+  if (e.data.type === 'aa-scroll' && Number.isFinite(e.data.y) && typeof e.data.tab === 'string' && /^[a-z]{1,30}$/.test(e.data.tab)) {
+    frameScroll[e.data.tab] = Math.max(0, Math.min(e.data.y, 1e7));
   }
   if (e.data.type === 'aa-log' && typeof e.data.id === 'string' && /^f_[a-z0-9_]{1,40}$/.test(e.data.id)) {
     const ids = new Set(logCharts());

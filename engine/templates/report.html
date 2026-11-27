@@ -247,8 +247,23 @@ document.getElementById('theme').addEventListener('click', () => {
   const dark = root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
   setTheme(dark ? 'light' : 'dark', true);
 });
+// tell the host where the reader is, so a redraw (or a reload for a new version) can come back here
+let scrollT = null;
+window.addEventListener('scroll', () => {
+  if (!EMBEDDED) return;
+  clearTimeout(scrollT);
+  scrollT = setTimeout(() => {
+    const tab = document.querySelector('section.tab.on')?.id;
+    if (tab) parent.postMessage({ type: 'aa-scroll', tab, y: Math.round(window.scrollY) }, '*');
+  }, 150);
+}, { passive: true });
 window.addEventListener('message', (e) => {
   if (!EMBEDDED || e.source !== window.parent || !e.data) return;
+  if (e.data.type === 'aa-set-scroll' && Number.isFinite(e.data.y)) {
+    const y = e.data.y;
+    const go = () => window.scrollTo(0, y);
+    requestAnimationFrame(go); setTimeout(go, 300); setTimeout(go, 900);   // again once lazy charts have their size
+  }
   if (e.data.type === 'aa-set-theme') setTheme(e.data.theme, false);
   if (e.data.type === 'aa-set-tab' && typeof e.data.tab === 'string') show(e.data.tab);
   if (e.data.type === 'aa-set-log' && Array.isArray(e.data.ids)) {
