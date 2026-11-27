@@ -720,20 +720,20 @@ async function checkForUpdate() {
 }
 // backup for a tab left open: look for a new version every few minutes (reloads by itself when it can)
 setInterval(() => { if (!$('result').hidden) checkForUpdate(); }, 5 * 60e3);
-// coming back to the page only checks for a new version of the app (no data refresh)
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && !$('result').hidden) checkForUpdate();
+// coming back to the page: a new version of the app if there is one, otherwise fresh data (updated in place)
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && !$('result').hidden && !(await checkForUpdate())) autoRefresh();
 });
 // switching back from another window (not another tab) only fires focus
 let lastFocusCheck = 0;
 window.addEventListener('focus', () => {
   if ($('result').hidden || Date.now() - lastFocusCheck < 30e3) return;
   lastFocusCheck = Date.now();
-  checkForUpdate();
+  checkForUpdate().then((upd) => { if (!upd) autoRefresh(); });
 });
 let refreshing = false;
 
-// Keep the report current without a manual Refresh: on switching report tabs, re-check orders, positions and quotes (at most every 30 s) and redraw only if something changed.
+// Keep the report current without a manual Refresh: on switching report tabs or coming back to the page, re-check orders, positions and quotes (at most every 30 s) and redraw only if something changed.
 // Skipped while the order popup is open or the re-pricing inputs hold edits (a redraw would drop them).
 let lastAutoAt = 0, rpEdited = false;
 // Update once more a minute after the next market open (fresh quotes), whatever the page is doing.
