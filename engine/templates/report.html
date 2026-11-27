@@ -259,6 +259,13 @@ window.addEventListener('scroll', () => {
 }, { passive: true });
 window.addEventListener('message', (e) => {
   if (!EMBEDDED || e.source !== window.parent || !e.data) return;
+  // a refresh loads the new report in a second, hidden frame: the host asks this one for the reader's view
+  // (scroll, readings picked, sorting, expanded groups, re-pricing edits) and has the new one apply it
+  if (e.data.type === 'aa-get-state') parent.postMessage({ type: 'aa-state', state: captureState() }, '*');
+  if (e.data.type === 'aa-apply-state' && e.data.state && typeof e.data.state === 'object') {
+    try { applyState(e.data.state); } catch (err) { /* best effort */ }
+    parent.postMessage({ type: 'aa-applied' }, '*');
+  }
   if (e.data.type === 'aa-set-scroll' && Number.isFinite(e.data.y)) {
     const y = e.data.y;
     const go = () => window.scrollTo(0, y);
@@ -687,6 +694,48 @@ document.querySelectorAll('table.sortable').forEach(t => {
     setGroup(t, sum, b.getAttribute('aria-expanded') !== 'true');
   });
 });
+function captureState() {
+  const s = { y: Math.round(scrollY), interp: {}, groups: {}, sort: {}, rp: {} };
+  document.querySelectorAll('select.interp').forEach((sel) => { if (sel.dataset.box) s.interp[sel.dataset.box] = sel.value; });
+  document.querySelectorAll('table.sortable').forEach((t) => {
+    if (!t.id) return;
+    const open = [...t.querySelectorAll('tr.grp-sum.open')].map((r) => r.dataset.grp);
+    if (open.length) s.groups[t.id] = open;
+    const ths = [...t.tHead.rows[0].cells];
+    const i = ths.findIndex((h) => h.classList.contains('asc') || h.classList.contains('desc'));
+    if (i >= 0) s.sort[t.id] = [ths[i].textContent, ths[i].classList.contains('asc')];
+  });
+  document.querySelectorAll('.rp-table tbody tr.edited').forEach((tr) => {
+    s.rp[tr.dataset.und] = [tr.querySelector('.rp-spot').value, tr.querySelector('.rp-iv').value];
+  });
+  return s;
+}
+function applyState(s) {
+  const q = (v) => String(v).replace(/["\\]/g, '\\$&');
+  for (const [box, v] of Object.entries(s.interp || {})) {
+    const sel = document.querySelector(`select.interp[data-box="${q(box)}"]`);
+    if (sel && sel.value !== v && [...sel.options].some((o) => o.value === v)) { sel.value = v; sel.dispatchEvent(new Event('change')); }
+  }
+  for (const [id, [name, asc]] of Object.entries(s.sort || {})) {
+    const t = document.getElementById(id);
+    const th = t && [...t.tHead.rows[0].cells].find((h) => h.textContent === name);
+    if (th) { th.click(); if (!asc) th.click(); }
+  }
+  for (const [id, open] of Object.entries(s.groups || {})) {
+    const t = document.getElementById(id);
+    if (!t || !Array.isArray(open)) continue;
+    open.forEach((g) => { const sum = t.querySelector(`tr.grp-sum[data-grp="${q(g)}"]`); if (sum) setGroup(t, sum, true); });
+  }
+  for (const [und, v] of Object.entries(s.rp || {})) {
+    const tr = document.querySelector(`.rp-table tbody tr[data-und="${q(und)}"]`);
+    if (!tr || !Array.isArray(v)) continue;
+    tr.querySelector('.rp-spot').value = v[0];
+    const iv = tr.querySelector('.rp-iv');
+    iv.value = v[1];
+    iv.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  if (s.y > 0) { const go = () => window.scrollTo(0, s.y); go(); requestAnimationFrame(go); }
+}
 try { const th = localStorage.getItem('aa-theme'); if (th) document.documentElement.dataset.theme = th; } catch (e) {}
 if (EMBEDDED) parent.postMessage({ type: 'aa-ready' }, '*');
 let start = location.hash.slice(1);

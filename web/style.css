@@ -69,11 +69,11 @@ code { font-size: 12px; }
   align-items: center; flex-wrap: wrap; }
 .summary { color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .summary b { color: var(--ink); }
-#frame { color-scheme: inherit; display: block; width: 100%; height: calc(100vh - 120px); min-height: 640px; border: 1px solid var(--ring);
+#frame, iframe.rframe { color-scheme: inherit; display: block; width: 100%; height: calc(100vh - 120px); min-height: 640px; border: 1px solid var(--ring);
   border-radius: 12px; background: var(--page); }
 @media (max-width: 640px) {
   .top, main { padding-left: 16px; padding-right: 16px; }
-  #frame { height: calc(100vh - 180px); }
+  #frame, iframe.rframe { height: calc(100vh - 180px); }
 }
 /* the report is laid out for ~1360px; give it room once it's showing */
 main:has(#result:not([hidden])) { max-width: 1440px; }

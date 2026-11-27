@@ -796,7 +796,7 @@ async function analyze(creds, force = false, onlyIfChanged = false) {
 function applyResult(out) {
   reports = out;
   renderCancelled();
-  show(currentView);
+  swapIn(reports[currentView]);
   const s = out.summary;
   $('summary').innerHTML = s
     ? `<b>${fmtMoney(s.equity)}</b> equity · P&amp;L <b>${fmtMoney(s.pnl, true)}</b> · time-weighted <b>${fmtPct(s.twr)}</b> · max drawdown <b>${fmtPct(s.max_dd)}</b>`
@@ -913,8 +913,56 @@ function logCharts() {
   try { return (JSON.parse(localStorage.getItem(LOG_STORE) || '[]') || []).filter((x) => typeof x === 'string'); }
   catch (_) { return []; }
 }
+// A refreshed report replaces the shown one without a visible reload: it loads in a second frame laid over
+// the first but hidden, takes over the reader's view (tab, scroll, readings, sorting, expanded groups,
+// re-pricing edits), and only then is swapped in.
+let pending = null, stateWaiter = null;
+function askState(win) {
+  return new Promise((res) => {
+    const t = setTimeout(() => { stateWaiter = null; res(null); }, 600);
+    stateWaiter = (s) => { clearTimeout(t); stateWaiter = null; res(s); };
+    win.postMessage({ type: 'aa-get-state' }, '*');
+  });
+}
+async function swapIn(html) {
+  const old = $('frame');
+  if (!old.srcdoc || $('result').hidden) { old.srcdoc = html; return; }
+  const state = await askState(old.contentWindow);
+  if (pending) { clearTimeout(pending.timer); pending.frame.remove(); }
+  const nf = old.cloneNode(false);
+  nf.removeAttribute('id');
+  Object.assign(nf.style, { position: 'absolute', left: old.offsetLeft + 'px', top: old.offsetTop + 'px', width: old.offsetWidth + 'px',
+    height: old.offsetHeight + 'px', visibility: 'hidden', pointerEvents: 'none' });
+  nf.srcdoc = html;
+  old.after(nf);
+  pending = { frame: nf, state: state || { y: frameScroll[currentTab || ''] || 0 }, timer: setTimeout(finishSwap, 6000) };
+}
+function finishSwap() {
+  if (!pending) return;
+  const nf = pending.frame;
+  clearTimeout(pending.timer);
+  pending = null;
+  const old = $('frame');
+  nf.removeAttribute('style');
+  old.remove();
+  nf.id = 'frame';
+}
 window.addEventListener('message', (e) => {
-  if (e.source !== $('frame').contentWindow || !e.data || typeof e.data !== 'object') return;
+  if (!e.data || typeof e.data !== 'object') return;
+  if (pending && e.source === pending.frame.contentWindow) {     // the new report, still hidden
+    const w = pending.frame.contentWindow;
+    if (e.data.type === 'aa-ready') {
+      w.postMessage({ type: 'aa-set-theme', theme: effectiveTheme() }, '*');
+      if (currentTab) w.postMessage({ type: 'aa-set-tab', tab: currentTab }, '*');
+      const ids = logCharts();
+      if (ids.length) w.postMessage({ type: 'aa-set-log', ids }, '*');
+      w.postMessage({ type: 'aa-apply-state', state: pending.state }, '*');
+    }
+    if (e.data.type === 'aa-applied') setTimeout(finishSwap, 120);
+    return;
+  }
+  if (e.source !== $('frame').contentWindow) return;
+  if (e.data.type === 'aa-state' && stateWaiter) stateWaiter(e.data.state && typeof e.data.state === 'object' ? e.data.state : null);
   if (e.data.type === 'aa-ready') {
     syncFrameTheme();
     if (currentTab) $('frame').contentWindow.postMessage({ type: 'aa-set-tab', tab: currentTab }, '*');
