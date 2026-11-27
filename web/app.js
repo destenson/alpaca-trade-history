@@ -700,12 +700,19 @@ function reloadForUpdate() {
   try { sessionStorage.setItem('aa-resume', JSON.stringify({ tab: currentTab, view: currentView, y: frameScroll[currentTab] || 0 })); } catch (e) { /* ignore */ }
   location.reload();
 }
+let reloadWhenIdle = false;
 async function checkForUpdate() {
   if (refreshing || !(await newerBuild())) return false;
   const st = $('refreshStatus');
   if (st.querySelector('.linkbtn')) return true;       // already offered
   st.classList.remove('err');
   if (!$('lock').hidden) {              // kept unlocked: the reload reopens the report by itself
+    // never while the reader is busy: an order popup open, or re-pricing edits; reload once they're done
+    if ($('ordDlg').open || rpEdited) {
+      st.textContent = '· A new version is live: it loads when you close the order popup.';
+      reloadWhenIdle = true;
+      return true;
+    }
     st.textContent = '· A new version is live: reloading…';
     setTimeout(reloadForUpdate, 600);
   } else {
@@ -1380,6 +1387,9 @@ $('ordKill').addEventListener('click', async () => {
   await afterOrderChange(st === 'canceled' ? `· ${c.und} order cancelled` : `· ${c.und} cancel requested (status ${st || 'unknown'})`, st !== 'canceled');
 });
 $('ordCancel').addEventListener('click', () => $('ordDlg').close());
+$('ordDlg').addEventListener('close', () => {
+  if (reloadWhenIdle && !rpEdited) setTimeout(() => { if (!$('ordDlg').open) checkForUpdate(); }, 1500);
+});
 async function afterOrderChange(msg, err) {
   $('ordDlg').close();
   $('refreshStatus').classList.toggle('err', !!err);
