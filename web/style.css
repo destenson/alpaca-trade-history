@@ -26,15 +26,14 @@ html, body { margin: 0; background: var(--page); color: var(--ink);
 /* This page's own rules stop at the report's box; the report brings its own (scoped to #report by app.js). */
 @scope (body) to (#report) {
 a { color: var(--accent); }
-.top { max-width: 1100px; margin: 0 auto; padding: 28px 24px 8px; display: flex; gap: 16px;
+.top { padding: 28px 24px 8px; display: flex; gap: 16px;
   justify-content: space-between; align-items: flex-start; flex-wrap: wrap; }
 .top h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
-.lede { margin: 6px 0 0; color: var(--ink-2); max-width: 680px; }
+.lede { margin: 6px 0 0; color: var(--ink-2); }
 .tools { display: flex; gap: 12px; align-items: center; margin-top: 2px; }
 .src { white-space: nowrap; }
 #themeBtn { padding: 4px 10px; font-size: 12px; color: var(--ink-2); }
-main { max-width: 1100px; margin: 0 auto; padding: 8px 24px 40px; }
-#result { max-width: none; }
+main { padding: 8px 24px 40px; }
 .card { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; padding: 18px 20px;
   margin: 12px 0; }
 .row { display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 14px; }
@@ -67,15 +66,16 @@ code { font-size: 12px; }
 #steps li.done::marker { color: var(--ok); }
 #steps li.active { color: var(--ink); font-weight: 500; }
 .err { color: var(--err); margin: 10px 0 0; white-space: pre-wrap; }
-.bar { max-width: 1360px; margin: 8px auto; display: flex; gap: 12px; justify-content: space-between;
+.bar { margin: 8px 0; display: flex; gap: 12px; justify-content: space-between;
   align-items: center; flex-wrap: wrap; }
 .summary { color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .summary b { color: var(--ink); }
 @media (max-width: 640px) {
   .top, main { padding-left: 16px; padding-right: 16px; }
 }
-/* the report is laid out for ~1360px; give it room once it's showing */
-main:has(#result:not([hidden])) { max-width: 1440px; }
+/* the report brings its own side gutters */
+main:has(#result:not([hidden])) { padding-left: 0; padding-right: 0; }
+.bar, .cancelled { padding: 0 24px; }
 #refreshStatus.err { color: var(--err); }
 #refresh:disabled { opacity: 0.7; cursor: progress; }
 

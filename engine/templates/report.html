@@ -47,12 +47,12 @@ document.addEventListener('click', function (e) {
 * { box-sizing: border-box; }
 html, body, :scope { margin: 0; background: var(--page); color: var(--ink);
   font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-header { padding: 20px 24px 0; max-width: 1360px; margin: 0 auto; display: flex; flex-wrap: wrap;
+header { padding: 20px 24px 0; display: flex; flex-wrap: wrap;
   gap: 8px 16px; align-items: baseline; justify-content: space-between; }
 header h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 header .meta { color: var(--ink-2); font-size: 13px; }
 nav { position: sticky; top: 0; z-index: 5; background: var(--page); border-bottom: 1px solid var(--grid); }
-nav .in { max-width: 1360px; margin: 0 auto; padding: 0 16px; display: flex; gap: 2px; overflow-x: auto;
+nav .in { padding: 0 16px; display: flex; gap: 2px; overflow-x: auto;
   scrollbar-width: none; }
 nav a { padding: 12px 12px 10px; color: var(--ink-2); text-decoration: none; white-space: nowrap;
   border-bottom: 2px solid transparent; font-weight: 500; }
@@ -60,7 +60,7 @@ nav a:hover { color: var(--ink); }
 nav a.on { color: var(--ink); border-bottom-color: var(--accent); }
 nav button { margin-left: auto; background: none; border: 1px solid var(--ring); color: var(--ink-2);
   border-radius: 6px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; align-self: center; }
-main { max-width: 1360px; margin: 0 auto; padding: 16px 24px 48px; }
+main { padding: 16px 24px 48px; }
 section.tab { display: none; }
 section.tab.on { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 section.tab > h2 { grid-column: 1 / -1; font-size: 16px; margin: 4px 0 0; font-weight: 600; }
@@ -153,7 +153,7 @@ figure.card[id] { scroll-margin-top: 64px; }
   background: color-mix(in srgb, var(--loss) 8%, var(--surface)); padding: 10px 16px; }
 .alert ul { margin: 4px 0 0; padding-left: 18px; color: var(--ink-2); }
 .plot { width: 100%; }
-footer { max-width: 1360px; margin: 0 auto; padding: 0 24px 32px; color: var(--muted); font-size: 12px; }
+footer { padding: 0 24px 32px; color: var(--muted); font-size: 12px; }
 @media (max-width: 860px) {
   header, main { padding-left: 16px; padding-right: 16px; }
   section.tab.on { grid-template-columns: minmax(0, 1fr); }
